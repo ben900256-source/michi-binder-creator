@@ -25,6 +25,7 @@ const PDF_LABEL_GAP_MM = 1.5;
 const PDF_IMAGE_PX_PER_MM = 6;
 const PDF_POINTS_PER_MM = 72 / 25.4;
 const CARD_SEARCH_PAGE_SIZE = 24;
+const PROJECT_HISTORY_MAX_DEPTH = 50;
 
 const DEFAULT_CROP = {
   scale: 1,
@@ -34,17 +35,25 @@ const DEFAULT_CROP = {
 };
 
 const DEFAULT_EXPORT_SETTINGS = {
-  pageRange: "",
-  includePageTitles: true,
-  includeAllCards: false,
-  includeNeededCards: true,
-  printNeededCardsGreyscale: true,
+  png: {
+    includePageTitles: true,
+    printNeededCardsGreyscale: true,
+  },
+  pdf: {
+    pageRange: "",
+    includePageTitles: true,
+    includeAllCards: false,
+    includeNeededCards: true,
+    printNeededCardsGreyscale: true,
+  },
 };
 
 // One project object drives the whole app and is serialized directly to localStorage/JSON.
 const state = {
   project: loadProject(),
   currentPageId: localStorage.getItem(CURRENT_PAGE_KEY),
+  lastModifiedPageId: localStorage.getItem(CURRENT_PAGE_KEY),
+  lastPlacedAssetId: null,
   selectedImageId: null,
   selectedCardId: null,
   selectedPlacementId: null,
@@ -89,16 +98,23 @@ const state = {
   indexedDbSavedAt: null,
   indexedDbSavePending: false,
   indexedDbAutoSaveTimer: null,
+  projectHistory: {
+    undoStack: [],
+    redoStack: [],
+    lastRecord: null,
+    coalesceKey: null,
+  },
 };
 
 const els = {
   projectNameInput: document.querySelector("#projectNameInput"),
+  undoProjectButton: document.querySelector("#undoProjectButton"),
+  redoProjectButton: document.querySelector("#redoProjectButton"),
   projectSetup: document.querySelector("#projectSetup"),
   projectSetupForm: document.querySelector("#projectSetupForm"),
   setupProjectNameInput: document.querySelector("#setupProjectNameInput"),
   setupRowsInput: document.querySelector("#setupRowsInput"),
   setupColsInput: document.querySelector("#setupColsInput"),
-  setupAutoSaveInput: document.querySelector("#setupAutoSaveInput"),
   projectBinderSummary: document.querySelector("#projectBinderSummary"),
   localSaveSummary: document.querySelector("#localSaveSummary"),
   imageImportWizard: document.querySelector("#imageImportWizard"),
@@ -164,12 +180,9 @@ const els = {
   settingsPocketHeightInput: document.querySelector("#settingsPocketHeightInput"),
   settingsGapXInput: document.querySelector("#settingsGapXInput"),
   settingsGapYInput: document.querySelector("#settingsGapYInput"),
-  settingsAutoSaveInput: document.querySelector("#settingsAutoSaveInput"),
-  menuAutoSaveInput: document.querySelector("#menuAutoSaveInput"),
   newProjectButton: document.querySelector("#newProjectButton"),
   newPageButton: document.querySelector("#newPageButton"),
   deleteProjectButton: document.querySelector("#deleteProjectButton"),
-  saveLocalButton: document.querySelector("#saveLocalButton"),
   loadLocalButton: document.querySelector("#loadLocalButton"),
   exportJsonButton: document.querySelector("#exportJsonButton"),
   importJsonButton: document.querySelector("#importJsonButton"),
@@ -178,11 +191,13 @@ const els = {
   exportSettingsModal: document.querySelector("#exportSettingsModal"),
   exportSettingsForm: document.querySelector("#exportSettingsForm"),
   exportSettingsCancelButton: document.querySelector("#exportSettingsCancelButton"),
-  exportPageRangeInput: document.querySelector("#exportPageRangeInput"),
-  exportIncludeTitlesInput: document.querySelector("#exportIncludeTitlesInput"),
-  exportIncludeAllCardsInput: document.querySelector("#exportIncludeAllCardsInput"),
-  exportIncludeNeededCardsInput: document.querySelector("#exportIncludeNeededCardsInput"),
-  exportNeededGreyscaleInput: document.querySelector("#exportNeededGreyscaleInput"),
+  pngExportIncludeTitlesInput: document.querySelector("#pngExportIncludeTitlesInput"),
+  pngExportNeededGreyscaleInput: document.querySelector("#pngExportNeededGreyscaleInput"),
+  pdfExportPageRangeInput: document.querySelector("#pdfExportPageRangeInput"),
+  pdfExportIncludeTitlesInput: document.querySelector("#pdfExportIncludeTitlesInput"),
+  pdfExportIncludeAllCardsInput: document.querySelector("#pdfExportIncludeAllCardsInput"),
+  pdfExportIncludeNeededCardsInput: document.querySelector("#pdfExportIncludeNeededCardsInput"),
+  pdfExportNeededGreyscaleInput: document.querySelector("#pdfExportNeededGreyscaleInput"),
   exportPngButton: document.querySelector("#exportPngButton"),
   exportPdfButton: document.querySelector("#exportPdfButton"),
   statusText: document.querySelector("#statusText"),
@@ -205,6 +220,8 @@ const els = {
 };
 
 ensureCurrentPage();
+state.lastPlacedAssetId = getInferredLastPlacedAssetId(state.project, state.lastModifiedPageId || state.currentPageId);
+resetProjectHistory();
 bindEvents();
 renderAll();
 hydrateProjectFromIndexedDbIfNeeded();
@@ -259,13 +276,28 @@ function loadExportSettings() {
     return normalizeExportSettings(JSON.parse(localStorage.getItem(EXPORT_SETTINGS_KEY) || "null"));
   } catch (error) {
     console.warn("Could not load export settings.", error);
-    return { ...DEFAULT_EXPORT_SETTINGS };
+    return normalizeExportSettings(null);
   }
 }
 
 function normalizeExportSettings(settings) {
+  const legacySettings = settings && !settings.png && !settings.pdf ? settings : null;
   return {
-    pageRange: typeof settings?.pageRange === "string" ? settings.pageRange : DEFAULT_EXPORT_SETTINGS.pageRange,
+    png: normalizePngExportSettings(settings?.png || legacySettings),
+    pdf: normalizePdfExportSettings(settings?.pdf || legacySettings),
+  };
+}
+
+function normalizePngExportSettings(settings) {
+  return {
+    includePageTitles: settings?.includePageTitles !== false,
+    printNeededCardsGreyscale: settings?.printNeededCardsGreyscale !== false,
+  };
+}
+
+function normalizePdfExportSettings(settings) {
+  return {
+    pageRange: typeof settings?.pageRange === "string" ? settings.pageRange : DEFAULT_EXPORT_SETTINGS.pdf.pageRange,
     includePageTitles: settings?.includePageTitles !== false,
     includeAllCards: settings?.includeAllCards === true,
     includeNeededCards: settings?.includeNeededCards !== false,
@@ -314,7 +346,7 @@ function normalizeProject(input) {
     cols,
     layout,
     setupComplete: input.setupComplete === true,
-    localAutoSave: input.localAutoSave !== false,
+    localAutoSave: true,
     pages: pages.length ? pages : fallback.pages,
     cards,
     images,
@@ -510,12 +542,48 @@ function getCurrentPage() {
   return state.project.pages.find((page) => page.id === state.currentPageId);
 }
 
+function setLastModifiedPageId(pageId) {
+  if (state.project.pages.some((page) => page.id === pageId)) {
+    state.lastModifiedPageId = pageId;
+  }
+}
+
+function setLastPlacedAssetId(assetId) {
+  if (getImage(assetId)) {
+    state.lastPlacedAssetId = assetId;
+  }
+}
+
+function selectPage(pageId, message = "Page selected") {
+  const page = state.project.pages.find((candidate) => candidate.id === pageId);
+  if (!page || page.id === state.currentPageId) {
+    return false;
+  }
+
+  state.currentPageId = page.id;
+  state.selectedPlacementId = null;
+  saveProject(message);
+  renderAll();
+  return true;
+}
+
+function cycleCurrentPage(direction) {
+  const pages = state.project.pages;
+  if (pages.length < 2) {
+    return false;
+  }
+
+  const currentIndex = getCurrentPageIndex();
+  const nextIndex = (currentIndex + direction + pages.length) % pages.length;
+  return selectPage(pages[nextIndex].id);
+}
+
 function addPage() {
   const page = createPage(`Page ${state.project.pages.length + 1}`);
   state.project.pages.push(page);
   state.currentPageId = page.id;
   state.selectedPlacementId = null;
-  saveProject("Page created");
+  saveProject("Page created", { modifiedPageId: page.id });
   renderAll();
 }
 
@@ -539,7 +607,7 @@ function deletePage(pageId) {
     state.selectedPlacementId = null;
   }
 
-  saveProject("Page deleted");
+  saveProject("Page deleted", { modifiedPageId: state.currentPageId });
   renderAll();
 }
 
@@ -554,7 +622,7 @@ function renamePage(pageId) {
   }
 
   page.title = nextTitle.trim() || `Page ${pageIndex + 1}`;
-  saveProject("Page renamed");
+  saveProject("Page renamed", { modifiedPageId: page.id });
   renderAll();
 }
 
@@ -611,15 +679,17 @@ function ensureProjectId(project = state.project) {
 }
 
 function startNewProject({ confirm = true } = {}) {
-  if (confirm && !window.confirm("Create a new project? Export or Save Local first if you need the current one.")) {
+  if (confirm && !window.confirm("Create a new project? Export JSON first if you need a separate backup.")) {
     return;
   }
 
   state.project = createDefaultProject();
   state.currentPageId = state.project.pages[0].id;
+  state.lastModifiedPageId = state.currentPageId;
+  state.lastPlacedAssetId = null;
   resetTransientProjectState();
   state.projectSetupRequested = true;
-  saveProject("New project ready");
+  saveProject("New project ready", { resetHistory: true });
   renderAll();
 }
 
@@ -645,8 +715,12 @@ async function deleteProject() {
   localStorage.removeItem(CURRENT_PAGE_KEY);
   state.project = createDefaultProject();
   state.currentPageId = state.project.pages[0].id;
+  state.lastModifiedPageId = state.currentPageId;
+  state.lastPlacedAssetId = null;
   resetTransientProjectState();
-  saveProject(localDeleteFailed ? "Project deleted; local save delete failed" : "Project deleted");
+  saveProject(localDeleteFailed ? "Project deleted; local save delete failed" : "Project deleted", {
+    resetHistory: true,
+  });
   renderAll();
 }
 
@@ -666,10 +740,202 @@ function getSelectedPlacement() {
   return page?.placements.find((placement) => placement.id === state.selectedPlacementId) || null;
 }
 
-function saveProject(message = "Saved") {
+function createProjectHistoryRecord() {
+  const project = normalizeProject(JSON.parse(JSON.stringify(state.project)));
+  return {
+    projectJson: JSON.stringify(project),
+    currentPageId: state.currentPageId,
+    lastModifiedPageId: state.lastModifiedPageId,
+    lastPlacedAssetId: state.lastPlacedAssetId,
+  };
+}
+
+function resetProjectHistory() {
+  state.projectHistory.undoStack = [];
+  state.projectHistory.redoStack = [];
+  state.projectHistory.coalesceKey = null;
+  state.projectHistory.lastRecord = createProjectHistoryRecord();
+  renderProjectHistoryControls();
+}
+
+function pushProjectHistoryRecord(stack, record) {
+  stack.push(record);
+  if (stack.length > PROJECT_HISTORY_MAX_DEPTH) {
+    stack.splice(0, stack.length - PROJECT_HISTORY_MAX_DEPTH);
+  }
+}
+
+function recordProjectHistoryForSave({ coalesceKey = null } = {}) {
+  const nextRecord = createProjectHistoryRecord();
+  const previousRecord = state.projectHistory.lastRecord;
+  if (!previousRecord) {
+    state.projectHistory.lastRecord = nextRecord;
+    state.projectHistory.coalesceKey = coalesceKey;
+    renderProjectHistoryControls();
+    return;
+  }
+
+  if (nextRecord.projectJson === previousRecord.projectJson) {
+    state.projectHistory.lastRecord = nextRecord;
+    if (!coalesceKey) {
+      state.projectHistory.coalesceKey = null;
+    }
+    renderProjectHistoryControls();
+    return;
+  }
+
+  const shouldCoalesce = coalesceKey && state.projectHistory.coalesceKey === coalesceKey;
+  let nextCoalesceKey = coalesceKey;
+  if (shouldCoalesce) {
+    const coalesceBaseRecord = state.projectHistory.undoStack[state.projectHistory.undoStack.length - 1];
+    if (coalesceBaseRecord?.projectJson === nextRecord.projectJson) {
+      state.projectHistory.undoStack.pop();
+      nextCoalesceKey = null;
+    }
+  } else {
+    pushProjectHistoryRecord(state.projectHistory.undoStack, previousRecord);
+  }
+
+  state.projectHistory.redoStack = [];
+  state.projectHistory.coalesceKey = nextCoalesceKey;
+  state.projectHistory.lastRecord = nextRecord;
+  renderProjectHistoryControls();
+}
+
+function endProjectHistoryCoalescing() {
+  state.projectHistory.coalesceKey = null;
+}
+
+function canUndoProjectChange() {
+  return state.projectHistory.undoStack.length > 0;
+}
+
+function canRedoProjectChange() {
+  return state.projectHistory.redoStack.length > 0;
+}
+
+function isOverlayOpen(element) {
+  return element && !element.hidden;
+}
+
+function hasBlockingOverlayOpen() {
+  return [
+    els.projectSetup,
+    els.imageImportWizard,
+    els.cardInsertPrompt,
+    els.imagePlacementModal,
+    els.imageOverlapModal,
+    els.projectMenuModal,
+    els.projectSettingsModal,
+    els.helpModal,
+    els.localProjectPicker,
+    els.exportSettingsModal,
+  ].some(isOverlayOpen);
+}
+
+function renderProjectHistoryControls() {
+  if (els.undoProjectButton) {
+    els.undoProjectButton.disabled = !canUndoProjectChange();
+  }
+  if (els.redoProjectButton) {
+    els.redoProjectButton.disabled = !canRedoProjectChange();
+  }
+}
+
+function clearProjectHistoryTransientState() {
+  if (state.imageOverlapChoiceResolver) {
+    resolveImageOverlapChoice("cancel");
+  } else if (els.imageOverlapModal) {
+    els.imageOverlapModal.hidden = true;
+  }
+
+  state.selectedPlacementId = null;
+  state.pendingCardSlot = null;
+  state.cardInsertSearchResults = [];
+  state.cardInsertSearchLoading = false;
+  state.cardInsertSearchQuery = "";
+  state.cardInsertSearchPage = 0;
+  state.cardInsertSearchHasMore = false;
+  state.placementClipboard = null;
+  state.draggedCardResult = null;
+  state.draggedCardAssetId = null;
+  state.imagePlacementDraft = null;
+  state.pendingImagePlacement = null;
+  state.hoveredSlot = null;
+  if (els.cardInsertSearchInput) {
+    els.cardInsertSearchInput.value = "";
+  }
+  if (els.cardInsertSearchStatus) {
+    els.cardInsertSearchStatus.textContent = "";
+  }
+}
+
+function restoreProjectHistoryRecord(record, message) {
+  try {
+    const restoredProject = normalizeProject(JSON.parse(record.projectJson));
+    state.project = restoredProject;
+    state.currentPageId = restoredProject.pages.some((page) => page.id === record.currentPageId)
+      ? record.currentPageId
+      : restoredProject.pages[0]?.id || null;
+    state.lastModifiedPageId = restoredProject.pages.some((page) => page.id === record.lastModifiedPageId)
+      ? record.lastModifiedPageId
+      : state.currentPageId;
+    state.lastPlacedAssetId = getImage(record.lastPlacedAssetId)
+      ? record.lastPlacedAssetId
+      : getInferredLastPlacedAssetId(restoredProject, state.lastModifiedPageId);
+    clearProjectHistoryTransientState();
+    saveProjectToLocalStorageBestEffort();
+    queueIndexedDbAutoSave();
+    setStatus(message);
+    renderAll();
+    state.projectHistory.lastRecord = createProjectHistoryRecord();
+    renderProjectHistoryControls();
+  } catch (error) {
+    console.warn("Could not restore project history.", error);
+    setStatus("Project history restore failed");
+  }
+}
+
+function undoProjectChange() {
+  endProjectHistoryCoalescing();
+  if (!canUndoProjectChange()) {
+    return;
+  }
+
+  const currentRecord = createProjectHistoryRecord();
+  const targetRecord = state.projectHistory.undoStack.pop();
+  pushProjectHistoryRecord(state.projectHistory.redoStack, currentRecord);
+  restoreProjectHistoryRecord(targetRecord, "Undid project change");
+}
+
+function redoProjectChange() {
+  endProjectHistoryCoalescing();
+  if (!canRedoProjectChange()) {
+    return;
+  }
+
+  const currentRecord = createProjectHistoryRecord();
+  const targetRecord = state.projectHistory.redoStack.pop();
+  pushProjectHistoryRecord(state.projectHistory.undoStack, currentRecord);
+  restoreProjectHistoryRecord(targetRecord, "Redid project change");
+}
+
+function saveProject(message = "Saved", options = {}) {
+  if (options.modifiedPageId) {
+    setLastModifiedPageId(options.modifiedPageId);
+  }
+  if (options.placedAssetId) {
+    setLastPlacedAssetId(options.placedAssetId);
+  }
+  if (options.resetHistory) {
+    resetProjectHistory();
+  } else {
+    recordProjectHistoryForSave({ coalesceKey: options.coalesceKey });
+  }
   saveProjectToLocalStorageBestEffort();
   setStatus(message);
   queueIndexedDbAutoSave();
+  renderProjectHistoryControls();
 }
 
 function saveProjectToLocalStorageBestEffort() {
@@ -712,7 +978,6 @@ function openProjectSettingsModal() {
   els.settingsPocketHeightInput.value = layout.pocketHeight;
   els.settingsGapXInput.value = layout.gapX;
   els.settingsGapYInput.value = layout.gapY;
-  els.settingsAutoSaveInput.checked = state.project.localAutoSave === true;
   els.projectSettingsModal.hidden = false;
   window.setTimeout(() => {
     els.settingsPocketWidthInput.focus();
@@ -727,7 +992,7 @@ function openExportSettingsModal() {
   syncExportSettingsControls();
   els.exportSettingsModal.hidden = false;
   window.setTimeout(() => {
-    els.exportPageRangeInput.focus();
+    els.pngExportIncludeTitlesInput.focus();
   }, 0);
 }
 
@@ -737,21 +1002,29 @@ function closeExportSettingsModal() {
 
 function syncExportSettingsControls() {
   const settings = normalizeExportSettings(state.exportSettings);
-  els.exportPageRangeInput.value = settings.pageRange;
-  els.exportIncludeTitlesInput.checked = settings.includePageTitles;
-  els.exportIncludeAllCardsInput.checked = settings.includeAllCards;
-  els.exportIncludeNeededCardsInput.checked = settings.includeNeededCards;
-  els.exportNeededGreyscaleInput.checked = settings.printNeededCardsGreyscale;
+  els.pngExportIncludeTitlesInput.checked = settings.png.includePageTitles;
+  els.pngExportNeededGreyscaleInput.checked = settings.png.printNeededCardsGreyscale;
+  els.pdfExportPageRangeInput.value = settings.pdf.pageRange;
+  els.pdfExportIncludeTitlesInput.checked = settings.pdf.includePageTitles;
+  els.pdfExportIncludeAllCardsInput.checked = settings.pdf.includeAllCards;
+  els.pdfExportIncludeNeededCardsInput.checked = settings.pdf.includeNeededCards;
+  els.pdfExportNeededGreyscaleInput.checked = settings.pdf.printNeededCardsGreyscale;
   updateExportSettingsControlState();
 }
 
 function saveExportSettingsFromControls({ closeModal = true, statusMessage = "Export settings saved" } = {}) {
   state.exportSettings = normalizeExportSettings({
-    pageRange: els.exportPageRangeInput.value.trim(),
-    includePageTitles: els.exportIncludeTitlesInput.checked,
-    includeAllCards: els.exportIncludeAllCardsInput.checked,
-    includeNeededCards: els.exportIncludeNeededCardsInput.checked,
-    printNeededCardsGreyscale: els.exportNeededGreyscaleInput.checked,
+    png: {
+      includePageTitles: els.pngExportIncludeTitlesInput.checked,
+      printNeededCardsGreyscale: els.pngExportNeededGreyscaleInput.checked,
+    },
+    pdf: {
+      pageRange: els.pdfExportPageRangeInput.value.trim(),
+      includePageTitles: els.pdfExportIncludeTitlesInput.checked,
+      includeAllCards: els.pdfExportIncludeAllCardsInput.checked,
+      includeNeededCards: els.pdfExportIncludeNeededCardsInput.checked,
+      printNeededCardsGreyscale: els.pdfExportNeededGreyscaleInput.checked,
+    },
   });
   persistExportSettings();
   if (closeModal) {
@@ -763,8 +1036,8 @@ function saveExportSettingsFromControls({ closeModal = true, statusMessage = "Ex
 }
 
 function updateExportSettingsControlState() {
-  els.exportNeededGreyscaleInput.disabled =
-    !els.exportIncludeAllCardsInput.checked && !els.exportIncludeNeededCardsInput.checked;
+  els.pdfExportNeededGreyscaleInput.disabled =
+    !els.pdfExportIncludeAllCardsInput.checked && !els.pdfExportIncludeNeededCardsInput.checked;
 }
 
 function getExportSettings() {
@@ -772,7 +1045,7 @@ function getExportSettings() {
   return state.exportSettings;
 }
 
-function getExportPageSelection(settings = getExportSettings()) {
+function getExportPageSelection(settings = getExportSettings().png) {
   return parsePageRange(settings.pageRange, state.project.pages.length);
 }
 
@@ -836,12 +1109,10 @@ function saveProjectSettings() {
     gapX: els.settingsGapXInput.value,
     gapY: els.settingsGapYInput.value,
   });
-  state.project.localAutoSave = els.settingsAutoSaveInput.checked;
+  state.project.localAutoSave = true;
   closeProjectSettingsModal();
   saveProject("Project settings updated");
-  if (state.project.localAutoSave) {
-    saveProjectToIndexedDb("Project settings updated");
-  }
+  saveProjectToIndexedDb("Project settings updated");
   renderAll();
 }
 
@@ -867,6 +1138,175 @@ function closeLocalProjectPicker() {
   els.localProjectPicker.hidden = true;
 }
 
+function getProjectQuickStats(project) {
+  const pages = Array.isArray(project?.pages) ? project.pages : [];
+  const placements = pages.reduce(
+    (count, page) => count + (Array.isArray(page?.placements) ? page.placements.length : 0),
+    0,
+  );
+  return {
+    pages: pages.length,
+    placements,
+    images: Array.isArray(project?.images) ? project.images.length : 0,
+    cards: Array.isArray(project?.cards) ? project.cards.length : 0,
+    rows: clampInteger(project?.rows, 1, 8, 3),
+    cols: clampInteger(project?.cols, 1, 8, 3),
+  };
+}
+
+function formatCount(count, singular, plural = `${singular}s`) {
+  return `${count} ${count === 1 ? singular : plural}`;
+}
+
+function formatProjectQuickStats(stats) {
+  return [
+    formatCount(stats.pages, "page"),
+    formatCount(stats.placements, "placement"),
+    formatCount(stats.images, "image"),
+    formatCount(stats.cards, "card"),
+    `${stats.rows}x${stats.cols}`,
+  ].join(" | ");
+}
+
+function getProjectAssetMap(project) {
+  const images = Array.isArray(project?.images) ? project.images : [];
+  const cards = Array.isArray(project?.cards) ? project.cards : [];
+  return new Map([...images, ...cards].filter((asset) => asset?.id).map((asset) => [asset.id, asset]));
+}
+
+function getProjectCardAssetIds(project) {
+  return new Set((Array.isArray(project?.cards) ? project.cards : []).map((card) => card.id).filter(Boolean));
+}
+
+function getInferredLastPlacedAssetId(project, preferredPageId = null) {
+  const assetMap = getProjectAssetMap(project);
+  const pages = Array.isArray(project?.pages) ? project.pages : [];
+  const preferredPage = pages.find((page) => page.id === preferredPageId);
+  const orderedPages = preferredPage
+    ? [preferredPage, ...pages.filter((page) => page !== preferredPage).reverse()]
+    : pages.slice().reverse();
+
+  for (const page of orderedPages) {
+    const placements = Array.isArray(page?.placements) ? page.placements.slice().reverse() : [];
+    const placement = placements.find((candidate) => assetMap.get(candidate?.imageId)?.dataUrl);
+    if (placement) {
+      return placement.imageId;
+    }
+  }
+
+  return null;
+}
+
+function getProjectLastPlacedAsset(project, lastPlacedAssetId = null, preferredPageId = null) {
+  const assetMap = getProjectAssetMap(project);
+  if (lastPlacedAssetId && assetMap.get(lastPlacedAssetId)?.dataUrl) {
+    return assetMap.get(lastPlacedAssetId);
+  }
+
+  const inferredAssetId = getInferredLastPlacedAssetId(project, preferredPageId);
+  return inferredAssetId ? assetMap.get(inferredAssetId) || null : null;
+}
+
+function getLocalProjectPlacementLayer(placement, index, cardAssetIds) {
+  const explicitLayer = normalizePlacementLayer(placement?.layer);
+  if (explicitLayer !== null) {
+    return explicitLayer;
+  }
+  return index + (cardAssetIds.has(placement?.imageId) ? 10000 : 0);
+}
+
+function getProjectPreviewPage(project, currentPageId = null) {
+  const pages = Array.isArray(project?.pages) ? project.pages : [];
+  return pages.find((page) => page.id === currentPageId) || pages[0] || null;
+}
+
+function getProjectPreviewPageLabel(project, currentPageId = null) {
+  const pages = Array.isArray(project?.pages) ? project.pages : [];
+  const page = getProjectPreviewPage(project, currentPageId);
+  if (!page) {
+    return "Preview: no pages";
+  }
+
+  const pageIndex = pages.findIndex((candidate) => candidate.id === page.id);
+  return `Preview: page ${pageIndex + 1}${page.title ? `, ${page.title}` : ""}`;
+}
+
+function createLocalProjectPagePreview(project, currentPageId = null, lastPlacedAssetId = null) {
+  const preview = document.createElement("span");
+  preview.className = "local-project-preview";
+  const page = getProjectPreviewPage(project, currentPageId);
+  const pageRender = document.createElement("span");
+  pageRender.className = "local-project-page-render";
+
+  if (page) {
+    const stats = getProjectQuickStats(project);
+    const assetMap = getProjectAssetMap(project);
+    const cardAssetIds = getProjectCardAssetIds(project);
+    const layout = normalizeProjectLayout(project);
+    const gridDimensions = {
+      width: stats.cols * layout.pocketWidth + Math.max(0, stats.cols - 1) * layout.gapX,
+      height: stats.rows * layout.pocketHeight + Math.max(0, stats.rows - 1) * layout.gapY,
+    };
+
+    pageRender.style.gridTemplateColumns = `repeat(${stats.cols}, minmax(0, 1fr))`;
+    pageRender.style.gridTemplateRows = `repeat(${stats.rows}, minmax(0, 1fr))`;
+    pageRender.style.aspectRatio = `${gridDimensions.width} / ${gridDimensions.height}`;
+
+    for (let row = 0; row < stats.rows; row += 1) {
+      for (let col = 0; col < stats.cols; col += 1) {
+        const pocket = document.createElement("span");
+        pocket.className = "local-project-page-pocket";
+        pocket.style.gridRow = `${row + 1} / span 1`;
+        pocket.style.gridColumn = `${col + 1} / span 1`;
+        pageRender.append(pocket);
+      }
+    }
+
+    const placements = (Array.isArray(page.placements) ? page.placements : [])
+      .map((placement, index) => ({ placement, index }))
+      .filter(({ placement }) => assetMap.get(placement?.imageId)?.dataUrl && placementFits(placement, stats.rows, stats.cols))
+      .sort(
+        (a, b) =>
+          getLocalProjectPlacementLayer(a.placement, a.index, cardAssetIds) -
+            getLocalProjectPlacementLayer(b.placement, b.index, cardAssetIds) || a.index - b.index,
+      );
+
+    placements.forEach(({ placement }, renderIndex) => {
+      const asset = assetMap.get(placement.imageId);
+      const block = document.createElement("span");
+      block.className = "local-project-page-placement";
+      block.style.gridRow = `${placement.row + 1} / span ${placement.rowSpan}`;
+      block.style.gridColumn = `${placement.col + 1} / span ${placement.colSpan}`;
+      block.style.zIndex = String(renderIndex + 2);
+
+      const image = document.createElement("img");
+      image.src = asset.dataUrl;
+      image.alt = "";
+      image.style.transform = cropToTransform(placement.crop);
+      block.append(image);
+      pageRender.append(block);
+    });
+  } else {
+    pageRender.classList.add("local-project-page-render-empty");
+    pageRender.textContent = "No page";
+  }
+
+  const lastAsset = getProjectLastPlacedAsset(project, lastPlacedAssetId, currentPageId);
+  const lastAssetPreview = document.createElement("span");
+  lastAssetPreview.className = "local-project-last-asset";
+  if (lastAsset) {
+    const image = document.createElement("img");
+    image.src = lastAsset.dataUrl;
+    image.alt = "";
+    lastAssetPreview.append(image);
+  } else {
+    lastAssetPreview.textContent = "No item";
+  }
+
+  preview.append(pageRender, lastAssetPreview);
+  return preview;
+}
+
 function renderLocalProjectPicker() {
   els.localProjectList.replaceChildren();
   if (!state.localProjectChoices.length) {
@@ -878,18 +1318,82 @@ function renderLocalProjectPicker() {
   }
 
   state.localProjectChoices.forEach((record) => {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "local-project-item";
+    const item = document.createElement("div");
+    item.className = "local-project-item";
+
+    const loadButton = document.createElement("button");
+    loadButton.type = "button";
+    loadButton.className = "local-project-load";
+
+    const previewPageId = record.lastModifiedPageId || record.currentPageId;
+    const lastAsset = getProjectLastPlacedAsset(record.project, record.lastPlacedAssetId, previewPageId);
+    const preview = createLocalProjectPagePreview(record.project, previewPageId, lastAsset?.id || null);
+
+    const copy = document.createElement("span");
+    copy.className = "local-project-copy";
     const savedText = record.savedAt ? new Date(record.savedAt).toLocaleString() : "Unknown save time";
-    button.innerHTML = `<span></span><small></small>`;
-    button.querySelector("span").textContent = record.name || "Untitled Binder";
-    button.querySelector("small").textContent = savedText;
-    button.addEventListener("click", () => {
+    const statsText = formatProjectQuickStats(getProjectQuickStats(record.project));
+    copy.innerHTML = `<strong></strong><small></small><small></small><small></small>`;
+    copy.querySelector("strong").textContent = record.name || "Untitled Binder";
+    const details = copy.querySelectorAll("small");
+    details[0].textContent = getProjectPreviewPageLabel(record.project, previewPageId);
+    details[1].textContent = lastAsset ? `Last item: ${lastAsset.name || "Untitled"}` : "Last item: none";
+    details[2].textContent = statsText;
+    details[3].textContent = savedText;
+    loadButton.append(preview, copy);
+    loadButton.addEventListener("click", () => {
       loadLocalProject(record.id);
     });
-    els.localProjectList.append(button);
+
+    const deleteButton = document.createElement("button");
+    deleteButton.type = "button";
+    deleteButton.className = "local-project-delete-button danger";
+    deleteButton.textContent = "Delete";
+    deleteButton.setAttribute("aria-label", `Delete ${record.name || "Untitled Binder"}`);
+    deleteButton.addEventListener("click", () => {
+      deleteLocalProject(record.id);
+    });
+
+    item.append(loadButton, deleteButton);
+    els.localProjectList.append(item);
   });
+}
+
+async function deleteLocalProject(projectId) {
+  const record = state.localProjectChoices.find((candidate) => candidate.id === projectId);
+  if (!record) {
+    return;
+  }
+
+  const name = record.name || "Untitled Binder";
+  const statsText = formatProjectQuickStats(getProjectQuickStats(record.project));
+  if (
+    !window.confirm(
+      `Delete local project "${name}"?\n\n${statsText}\n\nThis removes the saved copy from this browser.`,
+    )
+  ) {
+    return;
+  }
+
+  try {
+    const db = await openProjectDatabase();
+    const currentRecord = await getIndexedDbRecord(db, INDEXED_DB_CURRENT_PROJECT_ID);
+    await deleteIndexedDbRecord(db, projectId);
+    if (currentRecord?.currentProjectId === projectId || currentRecord?.id === projectId) {
+      await deleteIndexedDbRecord(db, INDEXED_DB_CURRENT_PROJECT_ID);
+    }
+    db.close();
+    state.localProjectChoices = state.localProjectChoices.filter((candidate) => candidate.id !== projectId);
+    if (state.project.id === projectId) {
+      state.indexedDbSavedAt = null;
+      renderProjectControls();
+    }
+    renderLocalProjectPicker();
+    setStatus(`Deleted local project "${name}"`);
+  } catch (error) {
+    console.warn("Could not delete local project.", error);
+    setStatus("Local project delete failed");
+  }
 }
 
 async function loadLocalProject(projectId) {
@@ -904,8 +1408,15 @@ async function loadLocalProject(projectId) {
 
     state.project = normalizeProject(record.project);
     state.currentPageId = record.currentPageId || state.project.pages[0]?.id || null;
+    state.lastModifiedPageId = record.lastModifiedPageId || state.currentPageId;
+    const loadedLastPlacedAssetId =
+      record.lastPlacedAssetId || getInferredLastPlacedAssetId(state.project, state.lastModifiedPageId);
+    state.lastPlacedAssetId = getImage(loadedLastPlacedAssetId)
+      ? loadedLastPlacedAssetId
+      : getInferredLastPlacedAssetId(state.project, state.lastModifiedPageId);
     resetTransientProjectState();
     state.indexedDbSavedAt = record.savedAt || null;
+    resetProjectHistory();
     saveProjectToLocalStorageBestEffort();
     await putIndexedDbRecord(db, {
       id: INDEXED_DB_CURRENT_PROJECT_ID,
@@ -914,7 +1425,6 @@ async function loadLocalProject(projectId) {
     });
     db.close();
     closeLocalProjectPicker();
-    setStatus(`Loaded ${state.project.name || "local project"}`);
     renderAll();
   } catch (error) {
     console.warn("Could not load local project.", error);
@@ -956,11 +1466,16 @@ async function saveProjectToIndexedDb(message = "Saved local", { quiet = false }
     const projectId = ensureProjectId();
     const projectCopy = JSON.parse(JSON.stringify(state.project));
     projectCopy.id = projectId;
+    const lastPlacedAssetId = getImage(state.lastPlacedAssetId)
+      ? state.lastPlacedAssetId
+      : getInferredLastPlacedAssetId(state.project, state.lastModifiedPageId);
     await putIndexedDbRecord(db, {
       id: projectId,
       name: projectCopy.name || "Untitled Binder",
       savedAt,
       currentPageId: state.currentPageId,
+      lastModifiedPageId: state.lastModifiedPageId || state.currentPageId,
+      lastPlacedAssetId,
       project: projectCopy,
     });
     await putIndexedDbRecord(db, {
@@ -975,7 +1490,7 @@ async function saveProjectToIndexedDb(message = "Saved local", { quiet = false }
     }
   } catch (error) {
     console.warn("Could not save project to IndexedDB.", error);
-    setStatus("Save Local failed");
+    setStatus("Autosave failed");
   } finally {
     state.indexedDbSavePending = false;
     renderProjectControls();
@@ -983,14 +1498,7 @@ async function saveProjectToIndexedDb(message = "Saved local", { quiet = false }
 }
 
 function queueIndexedDbAutoSave() {
-  if (!state.project.localAutoSave) {
-    if (state.indexedDbAutoSaveTimer) {
-      window.clearTimeout(state.indexedDbAutoSaveTimer);
-      state.indexedDbAutoSaveTimer = null;
-    }
-    return;
-  }
-
+  state.project.localAutoSave = true;
   if (state.indexedDbAutoSaveTimer) {
     window.clearTimeout(state.indexedDbAutoSaveTimer);
   }
@@ -1045,6 +1553,10 @@ async function migrateLegacyCurrentProjectRecord(db) {
     name: project.name || "Untitled Binder",
     savedAt,
     currentPageId: currentRecord.currentPageId || project.pages[0]?.id || null,
+    lastModifiedPageId: currentRecord.lastModifiedPageId || currentRecord.currentPageId || project.pages[0]?.id || null,
+    lastPlacedAssetId:
+      currentRecord.lastPlacedAssetId ||
+      getInferredLastPlacedAssetId(project, currentRecord.lastModifiedPageId || currentRecord.currentPageId),
     project,
   });
   await putIndexedDbRecord(db, {
@@ -1063,6 +1575,11 @@ async function getIndexedDbProjectRecords(db) {
       name: record.project?.name || record.name || "Untitled Binder",
       savedAt: record.savedAt || null,
       currentPageId: record.currentPageId || record.project?.pages?.[0]?.id || null,
+      lastModifiedPageId:
+        record.lastModifiedPageId || record.currentPageId || record.project?.pages?.[0]?.id || null,
+      lastPlacedAssetId:
+        record.lastPlacedAssetId ||
+        getInferredLastPlacedAssetId(record.project, record.lastModifiedPageId || record.currentPageId),
       project: record.project,
     }))
     .sort((a, b) => String(b.savedAt || "").localeCompare(String(a.savedAt || "")));
@@ -1115,21 +1632,26 @@ function bindEvents() {
     state.project.name = els.setupProjectNameInput.value.trim() || "My Binder";
     state.project.rows = rows;
     state.project.cols = cols;
-    state.project.localAutoSave = els.setupAutoSaveInput.checked;
+    state.project.localAutoSave = true;
     state.project.pages.forEach((page) => {
       page.placements = page.placements.filter((placement) => placementFits(placement, rows, cols));
     });
     state.project.setupComplete = true;
     state.setupInitialized = false;
     state.projectSetupRequested = false;
-    saveProject("Project created");
+    state.lastModifiedPageId = state.currentPageId;
+    state.lastPlacedAssetId = null;
+    saveProject("Project created", { resetHistory: true });
     renderAll();
   });
 
   els.projectNameInput.addEventListener("input", () => {
     state.project.name = els.projectNameInput.value;
-    saveProject();
+    saveProject("Saved", { coalesceKey: "project-name" });
   });
+  els.projectNameInput.addEventListener("blur", endProjectHistoryCoalescing);
+  els.undoProjectButton.addEventListener("click", undoProjectChange);
+  els.redoProjectButton.addEventListener("click", redoProjectChange);
 
   els.projectMenuButton.addEventListener("click", openProjectMenuModal);
   els.projectMenuCloseButton.addEventListener("click", closeProjectMenuModal);
@@ -1169,24 +1691,11 @@ function bindEvents() {
       closeLocalProjectPicker();
     }
   });
-  els.menuAutoSaveInput.addEventListener("change", () => {
-    state.project.localAutoSave = els.menuAutoSaveInput.checked;
-    saveProject(state.project.localAutoSave ? "Autosave enabled" : "Autosave disabled");
-    if (state.project.localAutoSave) {
-      saveProjectToIndexedDb("Autosave enabled");
-    }
-    renderProjectControls();
-  });
-
   els.newProjectButton.addEventListener("click", (event) => {
     closeProjectMenuModal();
     startNewProject();
   });
 
-  els.saveLocalButton.addEventListener("click", async (event) => {
-    closeProjectMenuModal();
-    await saveProjectToIndexedDb("Saved local");
-  });
   els.loadLocalButton.addEventListener("click", async () => {
     closeProjectMenuModal();
     try {
@@ -1327,8 +1836,8 @@ function bindEvents() {
     event.preventDefault();
     saveExportSettingsFromControls({ closeModal: false });
   });
-  els.exportIncludeAllCardsInput.addEventListener("change", updateExportSettingsControlState);
-  els.exportIncludeNeededCardsInput.addEventListener("change", updateExportSettingsControlState);
+  els.pdfExportIncludeAllCardsInput.addEventListener("change", updateExportSettingsControlState);
+  els.pdfExportIncludeNeededCardsInput.addEventListener("change", updateExportSettingsControlState);
   els.exportPngButton.addEventListener("click", () => {
     exportFromModal("png");
   });
@@ -1442,6 +1951,22 @@ function bindEvents() {
     const editingText = ["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement?.tagName);
     const shortcut = event.ctrlKey || event.metaKey;
     const key = event.key.toLowerCase();
+    if (shortcut && !editingText && key === "z") {
+      event.preventDefault();
+      if (event.shiftKey) {
+        redoProjectChange();
+      } else {
+        undoProjectChange();
+      }
+      return;
+    }
+
+    if (shortcut && !editingText && key === "y") {
+      event.preventDefault();
+      redoProjectChange();
+      return;
+    }
+
     if (shortcut && !editingText && key === "c") {
       event.preventDefault();
       copySelectedPlacement("copy");
@@ -1471,6 +1996,20 @@ function bindEvents() {
         targetSlot.col,
         targetPlacement?.id ?? null,
       );
+      return;
+    }
+
+    if (
+      !shortcut &&
+      !editingText &&
+      !event.altKey &&
+      !event.shiftKey &&
+      document.activeElement !== els.sidebarResizer &&
+      !hasBlockingOverlayOpen() &&
+      (event.key === "ArrowLeft" || event.key === "ArrowRight")
+    ) {
+      event.preventDefault();
+      cycleCurrentPage(event.key === "ArrowRight" ? 1 : -1);
       return;
     }
 
@@ -1562,9 +2101,8 @@ function renderProjectControls() {
   els.projectNameInput.value = state.project.name;
   els.projectBinderSummary.textContent =
     `Binder: ${grid.rows} rows x ${grid.cols} columns, pockets ${formatLayoutNumber(layout.pocketWidth)} x ${formatLayoutNumber(layout.pocketHeight)}, gaps ${formatLayoutNumber(layout.gapX)} x ${formatLayoutNumber(layout.gapY)}`;
-  els.saveLocalButton.disabled = state.indexedDbSavePending;
-  els.menuAutoSaveInput.checked = state.project.localAutoSave === true;
   els.localSaveSummary.textContent = getLocalSaveSummary();
+  renderProjectHistoryControls();
 }
 
 function formatLayoutNumber(value) {
@@ -1577,7 +2115,6 @@ function renderSetupControls() {
     els.setupProjectNameInput.value = state.project.name || "";
     els.setupRowsInput.value = grid.rows;
     els.setupColsInput.value = grid.cols;
-    els.setupAutoSaveInput.checked = state.project.localAutoSave === true;
     state.setupInitialized = true;
   }
 }
@@ -1591,9 +2128,7 @@ function getLocalSaveSummary() {
     ? `Last saved local: ${new Date(state.indexedDbSavedAt).toLocaleString()}`
     : "Not saved to IndexedDB";
 
-  return state.project.localAutoSave
-    ? `Local save: auto. ${savedText}`
-    : `Local save: manual. ${savedText}`;
+  return `Local save: auto. ${savedText}`;
 }
 
 function renderPageList() {
@@ -1610,16 +2145,13 @@ function renderPageList() {
     button.querySelector("span").textContent = `${index + 1}. ${page.title || `Page ${index + 1}`}`;
     button.querySelector("small").textContent = getSpreadLabelForIndex(index);
     button.addEventListener("click", () => {
-      state.currentPageId = page.id;
-      state.selectedPlacementId = null;
-      saveProject("Page selected");
-      renderAll();
+      selectPage(page.id);
     });
 
     const editButton = document.createElement("button");
     editButton.type = "button";
     editButton.className = "page-edit-button";
-    editButton.textContent = "Edit";
+    editButton.textContent = "Rename";
     editButton.title = `Rename ${page.title || `Page ${index + 1}`}`;
     editButton.setAttribute("aria-label", editButton.title);
     editButton.addEventListener("click", () => {
@@ -2580,7 +3112,7 @@ function deleteImageAsset(imageId) {
   }
   state.imageNaturalSizes.delete(imageId);
 
-  saveProject("Image deleted");
+  saveProject("Image deleted", { modifiedPageId: state.currentPageId });
   renderAll();
 }
 
@@ -2885,7 +3417,7 @@ function savePlacementDraftChanges() {
   );
   state.imagePlacementDraft = null;
   state.selectedPlacementId = nextPlacement.id;
-  saveProject("Placement updated");
+  saveProject("Placement updated", { modifiedPageId: page.id });
   renderAll();
 }
 
@@ -3080,7 +3612,7 @@ async function placeCardAtSlot(cardId, pageId, row, col) {
   state.selectedCardId = card.id;
   state.selectedPlacementId = nextPlacement.id;
   state.pendingCardSlot = null;
-  saveProject("Card placed");
+  saveProject("Card placed", { modifiedPageId: page.id, placedAssetId: card.id });
   renderAll();
   return true;
 }
@@ -3501,7 +4033,7 @@ async function placePendingImage(pageId, row, col) {
   page.placements.push(nextPlacement);
   state.selectedPlacementId = nextPlacement.id;
   state.pendingImagePlacement = null;
-  saveProject("Image placed");
+  saveProject("Image placed", { modifiedPageId: page.id, placedAssetId: nextPlacement.imageId });
   renderAll();
 }
 
@@ -3929,7 +4461,7 @@ function swapClipboardIntoSlot(targetPageId, row, col, targetPlacementId = null)
   state.pendingCardSlot = null;
   state.placementClipboard = null;
   state.hoveredSlot = null;
-  saveProject(`${targetPlacements.length + 1} placements swapped`);
+  saveProject(`${targetPlacements.length + 1} placements swapped`, { modifiedPageId: targetPage.id });
   renderAll();
   return true;
 }
@@ -4045,7 +4577,10 @@ async function pastePlacementClipboard(pageId, row, col) {
   state.selectedPlacementId = nextPlacement.id;
   state.pendingCardSlot = null;
   state.placementClipboard = null;
-  saveProject(`${clipboard.mode === "cut" ? "Moved" : "Pasted"} ${asset.name}`);
+  saveProject(`${clipboard.mode === "cut" ? "Moved" : "Pasted"} ${asset.name}`, {
+    modifiedPageId: page.id,
+    placedAssetId: nextPlacement.imageId,
+  });
   renderAll();
   return true;
 }
@@ -4074,7 +4609,7 @@ function deletePlacement(pageId, placementId, { confirmDelete = true } = {}) {
     state.selectedPlacementId = null;
   }
   state.currentPageId = page.id;
-  saveProject(`${assetKind === "card" ? "Card" : "Image"} deleted from layout`);
+  saveProject(`${assetKind === "card" ? "Card" : "Image"} deleted from layout`, { modifiedPageId: page.id });
   renderAll();
   return true;
 }
@@ -4352,10 +4887,12 @@ async function importProjectJson() {
 
     state.project = nextProject;
     state.currentPageId = state.project.pages[0].id;
+    state.lastModifiedPageId = state.currentPageId;
+    state.lastPlacedAssetId = getInferredLastPlacedAssetId(state.project, state.lastModifiedPageId);
     state.selectedImageId = state.project.images[0]?.id || null;
     state.selectedCardId = state.project.cards[0]?.id || null;
-    state.selectedPlacementId = null;
-    saveProject("Project imported");
+    clearProjectHistoryTransientState();
+    saveProject("Project imported", { resetHistory: true });
     renderAll();
   } catch (error) {
     console.warn("Could not import project JSON.", error);
@@ -4365,41 +4902,44 @@ async function importProjectJson() {
 
 async function exportFromModal(format) {
   saveExportSettingsFromControls({ closeModal: false, statusMessage: "" });
-  const settings = getExportSettings();
+  const allSettings = getExportSettings();
+  const settings = format === "pdf" ? allSettings.pdf : allSettings.png;
+  if (format === "png") {
+    const pages = getCurrentSpreadPages();
+    if (!pages.length) {
+      setStatus("No visible pages to export");
+      return;
+    }
+
+    closeExportSettingsModal();
+    await exportCurrentPagePng({ settings, pages });
+    return;
+  }
+
   const pageSelection = getExportPageSelection(settings);
   if (pageSelection.error) {
     setStatus(pageSelection.error);
-    els.exportPageRangeInput.focus();
+    els.pdfExportPageRangeInput.focus();
     return;
   }
   if (!pageSelection.pages.length) {
     setStatus("No pages to export");
     return;
   }
-  if (format === "pdf" && !getProjectPdfCutouts(settings, pageSelection).length) {
+  if (!getProjectPdfCutouts(settings, pageSelection).length) {
     setStatus("No matching cutouts to export");
     return;
   }
 
   closeExportSettingsModal();
-  if (format === "png") {
-    await exportCurrentPagePng({ settings, pageSelection });
-  } else {
-    await exportCutSheetPdf({ settings, pageSelection });
-  }
+  await exportCutSheetPdf({ settings, pageSelection });
 }
 
 async function exportCurrentPagePng(options = {}) {
-  const settings = options.settings || getExportSettings();
-  const pageSelection = options.pageSelection || getExportPageSelection(settings);
-  if (pageSelection.error) {
-    openExportSettingsModal();
-    setStatus(pageSelection.error);
-    return;
-  }
-  const pages = pageSelection.pages;
+  const settings = normalizePngExportSettings(options.settings || getExportSettings().png);
+  const pages = options.pages || getCurrentSpreadPages();
   if (!pages.length) {
-    setStatus("No pages to export");
+    setStatus("No visible pages to export");
     return;
   }
 
@@ -4423,7 +4963,7 @@ async function exportCurrentPagePng(options = {}) {
 }
 
 async function exportCutSheetPdf(options = {}) {
-  const settings = options.settings || getExportSettings();
+  const settings = normalizePdfExportSettings(options.settings || getExportSettings().pdf);
   const pageSelection = options.pageSelection || getExportPageSelection(settings);
   if (pageSelection.error) {
     openExportSettingsModal();
@@ -4453,7 +4993,8 @@ async function exportCutSheetPdf(options = {}) {
   }
 }
 
-function getProjectPdfCutouts(settings = getExportSettings(), pageSelection = getExportPageSelection(settings)) {
+function getProjectPdfCutouts(settings = getExportSettings().pdf, pageSelection = getExportPageSelection(settings)) {
+  const pdfSettings = normalizePdfExportSettings(settings);
   const layout = getProjectLayout();
   const cutouts = [];
   const selectedPageIndexes = new Set(pageSelection.pageIndexes);
@@ -4464,7 +5005,7 @@ function getProjectPdfCutouts(settings = getExportSettings(), pageSelection = ge
     const pageNumber = getPageNumber(page);
     getSegmentedPlacementRenderEntries(page).forEach((entry) => {
       const isNeededCard = entry.isCard && !isCardOwned(entry.image);
-      const includeCard = entry.isCard && (settings.includeAllCards || (settings.includeNeededCards && isNeededCard));
+      const includeCard = entry.isCard && (pdfSettings.includeAllCards || (pdfSettings.includeNeededCards && isNeededCard));
       if (!includeCard && !isImagePlacement(entry.placement)) return;
 
       const visiblePlacement = entry.segment || entry.placement;
@@ -4474,13 +5015,13 @@ function getProjectPdfCutouts(settings = getExportSettings(), pageSelection = ge
       const sourceOffsetY = entry.segment ? entry.segment.sourceRow * (layout.pocketHeight + layout.gapY) : 0;
       const segmentText = entry.segmentCount > 1 ? ` segment ${entry.segmentIndex + 1}/${entry.segmentCount}` : "";
       const cardText = isNeededCard ? " needed card" : "";
-      const titleText = settings.includePageTitles ? ` ${page.title || `Page ${pageNumber}`}` : "";
+      const titleText = pdfSettings.includePageTitles ? ` ${page.title || `Page ${pageNumber}`}` : "";
 
       cutouts.push({
         id: `${page.id}-${entry.placement.id}-${entry.segmentIndex}`,
         image: entry.image,
         crop: normalizeCrop(entry.placement.crop),
-        muted: isNeededCard && settings.printNeededCardsGreyscale,
+        muted: isNeededCard && pdfSettings.printNeededCardsGreyscale,
         pageNumber,
         row: visiblePlacement.row,
         col: visiblePlacement.col,
@@ -4793,10 +5334,10 @@ function getSpreadExportName(pages) {
   return `pages-${pages.map((page) => getPageNumber(page)).join("-")}`;
 }
 
-async function renderSpreadToCanvas(pages, settings = getExportSettings()) {
+async function renderSpreadToCanvas(pages, settings = getExportSettings().png) {
   const grid = getProjectGrid();
   const layout = getProjectLayout();
-  const exportSettings = normalizeExportSettings(settings);
+  const exportSettings = normalizePngExportSettings(settings);
   const exportScale = 180 / DEFAULT_PROJECT_LAYOUT.pocketWidth;
   const slotWidth = layout.pocketWidth * exportScale;
   const slotHeight = layout.pocketHeight * exportScale;

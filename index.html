@@ -26,10 +26,6 @@
             <input id="setupColsInput" type="number" min="1" max="8" step="1" value="3" />
           </label>
         </div>
-        <label class="check-field">
-          <input id="setupAutoSaveInput" type="checkbox" />
-          <span>Auto save local</span>
-        </label>
         <button type="submit" class="wide primary">Create Project</button>
       </form>
     </div>
@@ -156,17 +152,12 @@
         <h1>Project Menu</h1>
         <div class="menu-actions">
           <button id="newProjectButton" type="button">New Project</button>
-          <button id="saveLocalButton" type="button">Save Local</button>
-          <button id="loadLocalButton" type="button">Load Local Project</button>
+          <button id="loadLocalButton" type="button">Load Project</button>
           <button id="projectSettingsButton" type="button">Project Settings</button>
           <button id="exportJsonButton" type="button">Export JSON</button>
           <button id="importJsonButton" type="button">Import JSON</button>
           <button id="deleteProjectButton" type="button" class="danger">Delete Project</button>
         </div>
-        <label class="check-field menu-check">
-          <input id="menuAutoSaveInput" type="checkbox" />
-          <span>Enable autosave local</span>
-        </label>
         <button id="projectMenuCloseButton" type="button" class="wide">Close</button>
       </div>
     </div>
@@ -194,10 +185,6 @@
             <input id="settingsGapYInput" type="number" min="0" max="100" step="0.1" />
           </label>
         </div>
-        <label class="check-field">
-          <input id="settingsAutoSaveInput" type="checkbox" />
-          <span>Auto save local</span>
-        </label>
         <div class="button-grid">
           <button id="projectSettingsCancelButton" type="button">Cancel</button>
           <button type="submit" class="primary">Save Settings</button>
@@ -208,30 +195,47 @@
     <div id="exportSettingsModal" class="setup-overlay" hidden>
       <form id="exportSettingsForm" class="setup-card settings-card">
         <h1>Export</h1>
-        <label class="field">
-          <span>Page range</span>
-          <input id="exportPageRangeInput" type="text" autocomplete="off" placeholder="All pages or 1-3, 5" />
-        </label>
-        <label class="check-field">
-          <input id="exportIncludeTitlesInput" type="checkbox" />
-          <span>Include page titles</span>
-        </label>
-        <label class="check-field">
-          <input id="exportIncludeAllCardsInput" type="checkbox" />
-          <span>Include all cards</span>
-        </label>
-        <label class="check-field">
-          <input id="exportIncludeNeededCardsInput" type="checkbox" />
-          <span>Include needed cards</span>
-        </label>
-        <label class="check-field">
-          <input id="exportNeededGreyscaleInput" type="checkbox" />
-          <span>Print needed cards in greyscale</span>
-        </label>
-        <div class="button-grid export-actions">
+        <div class="export-setting-sections">
+          <section class="export-section">
+            <h2>PNG</h2>
+            <label class="check-field">
+              <input id="pngExportIncludeTitlesInput" type="checkbox" />
+              <span>Include page titles</span>
+            </label>
+            <label class="check-field">
+              <input id="pngExportNeededGreyscaleInput" type="checkbox" />
+              <span>Show needed cards in greyscale</span>
+            </label>
+            <button id="exportPngButton" type="button" class="primary wide">Export PNG</button>
+          </section>
+
+          <section class="export-section">
+            <h2>PDF</h2>
+            <label class="field">
+              <span>Page range</span>
+              <input id="pdfExportPageRangeInput" type="text" autocomplete="off" placeholder="All pages or 1-3, 5" />
+            </label>
+            <label class="check-field">
+              <input id="pdfExportIncludeTitlesInput" type="checkbox" />
+              <span>Include page titles in labels</span>
+            </label>
+            <label class="check-field">
+              <input id="pdfExportIncludeAllCardsInput" type="checkbox" />
+              <span>Include all cards</span>
+            </label>
+            <label class="check-field">
+              <input id="pdfExportIncludeNeededCardsInput" type="checkbox" />
+              <span>Include needed cards</span>
+            </label>
+            <label class="check-field">
+              <input id="pdfExportNeededGreyscaleInput" type="checkbox" />
+              <span>Print needed cards in greyscale</span>
+            </label>
+            <button id="exportPdfButton" type="button" class="wide">Export PDF</button>
+          </section>
+        </div>
+        <div class="button-grid">
           <button id="exportSettingsCancelButton" type="button">Cancel</button>
-          <button id="exportPngButton" type="button" class="primary">Export PNG</button>
-          <button id="exportPdfButton" type="button">Export PDF</button>
         </div>
       </form>
     </div>
@@ -256,7 +260,7 @@
     <div id="localProjectPicker" class="setup-overlay" hidden>
       <div class="setup-card local-project-card">
         <h1>Local Projects</h1>
-        <p class="status">Choose a project saved on this browser.</p>
+        <p class="status">Select a Project to Load</p>
         <div id="localProjectList" class="local-project-list"></div>
         <div class="button-grid">
           <button id="localProjectNewButton" type="button">New Project</button>
@@ -279,6 +283,10 @@
             <span>Name</span>
             <input id="projectNameInput" type="text" autocomplete="off" />
           </label>
+          <div class="project-history-actions" aria-label="Project history">
+            <button id="undoProjectButton" type="button" class="small-action-button" title="Undo (Ctrl+Z)">Undo</button>
+            <button id="redoProjectButton" type="button" class="small-action-button" title="Redo (Ctrl+Y or Ctrl+Shift+Z)">Redo</button>
+          </div>
           <p id="projectBinderSummary" class="status"></p>
           <p id="localSaveSummary" class="status"></p>
           <input id="importJsonInput" type="file" accept="application/json,.json" hidden />
