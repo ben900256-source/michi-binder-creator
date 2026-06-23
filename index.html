@@ -4,6 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Michi Binder Creator</title>
+    <link rel="icon" type="image/svg+xml" href="favicon.svg" />
     <link rel="stylesheet" href="styles.css" />
     <script src="app.js" defer></script>
   </head>
@@ -114,6 +115,8 @@
         <div class="menu-actions">
           <button id="newProjectButton" type="button">New Project</button>
           <button id="saveLocalButton" type="button">Save Local</button>
+          <button id="loadLocalButton" type="button">Load Local Project</button>
+          <button id="projectSettingsButton" type="button">Project Settings</button>
           <button id="exportJsonButton" type="button">Export JSON</button>
           <button id="importJsonButton" type="button">Import JSON</button>
           <button id="deleteProjectButton" type="button" class="danger">Delete Project</button>
@@ -126,12 +129,78 @@
       </div>
     </div>
 
+    <div id="projectSettingsModal" class="setup-overlay" hidden>
+      <form id="projectSettingsForm" class="setup-card settings-card">
+        <h1>Project Settings</h1>
+        <div class="inline-fields">
+          <label class="field">
+            <span>Pocket width</span>
+            <input id="settingsPocketWidthInput" type="number" min="10" max="300" step="0.1" />
+          </label>
+          <label class="field">
+            <span>Pocket height</span>
+            <input id="settingsPocketHeightInput" type="number" min="10" max="300" step="0.1" />
+          </label>
+        </div>
+        <div class="inline-fields">
+          <label class="field">
+            <span>X gap</span>
+            <input id="settingsGapXInput" type="number" min="0" max="100" step="0.1" />
+          </label>
+          <label class="field">
+            <span>Y gap</span>
+            <input id="settingsGapYInput" type="number" min="0" max="100" step="0.1" />
+          </label>
+        </div>
+        <label class="check-field">
+          <input id="settingsAutoSaveInput" type="checkbox" />
+          <span>Auto save local</span>
+        </label>
+        <div class="button-grid">
+          <button id="projectSettingsCancelButton" type="button">Cancel</button>
+          <button type="submit" class="primary">Save Settings</button>
+        </div>
+      </form>
+    </div>
+
+    <div id="helpModal" class="setup-overlay" hidden>
+      <div class="setup-card help-card">
+        <h1>Help</h1>
+        <p>
+          Michi Binder Creator is a browser-only layout planner for binder pages, image inserts, and
+          TCGdex card art.
+        </p>
+        <p>
+          Created by
+          <a href="https://www.elitefourum.com/u/stealthyturtle/summary" target="_blank" rel="noopener noreferrer">
+            StealthyTurtle
+          </a>.
+        </p>
+        <button id="helpCloseButton" type="button" class="wide">Close</button>
+      </div>
+    </div>
+
+    <div id="localProjectPicker" class="setup-overlay" hidden>
+      <div class="setup-card local-project-card">
+        <h1>Local Projects</h1>
+        <p class="status">Choose a project saved on this browser.</p>
+        <div id="localProjectList" class="local-project-list"></div>
+        <div class="button-grid">
+          <button id="localProjectNewButton" type="button">New Project</button>
+          <button id="localProjectCloseButton" type="button">Continue Current</button>
+        </div>
+      </div>
+    </div>
+
     <div class="app-shell">
       <aside class="sidebar" aria-label="Binder controls">
         <section class="panel">
           <div class="panel-heading">
             <h2>Project</h2>
-            <button id="projectMenuButton" type="button" class="small-action-button">Menu</button>
+            <div class="panel-heading-actions">
+              <button id="helpButton" type="button" class="small-action-button">Help</button>
+              <button id="projectMenuButton" type="button" class="small-action-button">Menu</button>
+            </div>
           </div>
           <label class="field">
             <span>Name</span>

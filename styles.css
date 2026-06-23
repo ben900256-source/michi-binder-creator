@@ -263,6 +263,48 @@ select:disabled {
   margin: 12px 0 4px;
 }
 
+.settings-card,
+.help-card,
+.local-project-card {
+  max-width: 430px;
+}
+
+.help-card p {
+  color: var(--muted);
+  line-height: 1.45;
+  margin: 0 0 12px;
+}
+
+.help-card a {
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.local-project-list {
+  display: grid;
+  gap: 8px;
+  margin: 12px 0;
+  max-height: min(52vh, 420px);
+  overflow: auto;
+}
+
+.local-project-item {
+  align-items: start;
+  display: grid;
+  gap: 3px;
+  justify-items: start;
+  text-align: left;
+  width: 100%;
+}
+
+.local-project-item span {
+  font-weight: 700;
+}
+
+.local-project-item small {
+  color: var(--muted);
+}
+
 .card-insert-list {
   display: grid;
   gap: 8px;
@@ -343,6 +385,11 @@ select:disabled {
 
 .panel-heading h2 {
   margin: 0;
+}
+
+.panel-heading-actions {
+  display: flex;
+  gap: 6px;
 }
 
 .small-action-button {
@@ -593,6 +640,10 @@ input[type="range"] {
   background: #f7f9f7;
 }
 
+.card-result.dragging {
+  opacity: 0.55;
+}
+
 .card-result img {
   aspect-ratio: 0.716;
   background: #eeeae2;
@@ -645,6 +696,10 @@ input[type="range"] {
   box-shadow:
     0 0 0 2px rgba(36, 152, 95, 0.28),
     inset 3px 0 0 #24985f;
+}
+
+.library-item.dragging {
+  opacity: 0.55;
 }
 
 .library-item img {
@@ -906,7 +961,9 @@ input[type="range"] {
   cursor: copy;
 }
 
-.pocket:hover {
+.pocket:hover,
+.pocket.dragover,
+.placement.dragover {
   border-color: rgba(40, 107, 99, 0.62);
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.7),
@@ -923,7 +980,7 @@ input[type="range"] {
   min-height: 0;
   min-width: 0;
   pointer-events: none;
-  z-index: 5;
+  z-index: 1000;
 }
 
 .placement-target-preview.invalid {
@@ -948,6 +1005,22 @@ input[type="range"] {
     0 0 0 4px rgba(36, 152, 95, 0.55),
     0 8px 20px rgba(28, 35, 42, 0.2);
   z-index: 3;
+}
+
+.placement.clipboard-preview {
+  border: 2px dashed #24985f;
+  box-shadow:
+    0 0 0 3px rgba(36, 152, 95, 0.22),
+    0 8px 20px rgba(28, 35, 42, 0.16);
+  filter: grayscale(1);
+  opacity: 0.72;
+  pointer-events: none;
+  z-index: 1000;
+}
+
+.placement.clipboard-preview.invalid {
+  border-color: var(--danger);
+  box-shadow: 0 0 0 3px rgba(155, 44, 44, 0.18);
 }
 
 .placement-image-layer {
@@ -998,6 +1071,12 @@ input[type="range"] {
     transform 130ms ease;
   width: 30px;
   z-index: 4;
+}
+
+.placement-controls-hidden .placement-badge,
+.placement-controls-hidden .placement-trash,
+.placement-controls-hidden .placement-edit {
+  display: none;
 }
 
 .placement-trash::before {

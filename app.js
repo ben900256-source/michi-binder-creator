@@ -5,11 +5,16 @@ const INDEXED_DB_NAME = "michiBinderCreator";
 const INDEXED_DB_STORE = "projects";
 const INDEXED_DB_CURRENT_PROJECT_ID = "current";
 const SIDEBAR_WIDTH_KEY = "michiBinderCreator.sidebarWidth.v1";
-const CARD_ASPECT = 63 / 88;
 const BINDER_ZOOM_MIN = 0.05;
 const BINDER_ZOOM_MAX = 2;
 const SIDEBAR_WIDTH_MIN = 240;
 const SIDEBAR_WIDTH_MAX = 560;
+const DEFAULT_PROJECT_LAYOUT = {
+  pocketWidth: 63,
+  pocketHeight: 88,
+  gapX: 3.5,
+  gapY: 3.5,
+};
 
 const DEFAULT_CROP = {
   scale: 1,
@@ -26,6 +31,7 @@ const state = {
   selectedCardId: null,
   selectedPlacementId: null,
   setupInitialized: false,
+  projectSetupRequested: false,
   cardSearchResults: [],
   cardSearchLoading: false,
   cardInsertSearchResults: [],
@@ -34,11 +40,14 @@ const state = {
   imageImportIndex: 0,
   pendingCardSlot: null,
   placementClipboard: null,
+  draggedCardResult: null,
+  draggedCardAssetId: null,
   imagePlacementDraft: null,
   pendingImagePlacement: null,
   imageNaturalSizes: new Map(),
   imageNaturalSizeLoads: new Set(),
   imagePlacementPanGesture: null,
+  localProjectChoices: [],
   hoveredSlot: null,
   binderZoom: 1,
   fitToDisplay: true,
@@ -98,14 +107,31 @@ const els = {
   imagePlacementResetCropButton: document.querySelector("#imagePlacementResetCropButton"),
   imagePlacementCancelButton: document.querySelector("#imagePlacementCancelButton"),
   imagePlacementStartButton: document.querySelector("#imagePlacementStartButton"),
+  helpButton: document.querySelector("#helpButton"),
+  helpModal: document.querySelector("#helpModal"),
+  helpCloseButton: document.querySelector("#helpCloseButton"),
+  localProjectPicker: document.querySelector("#localProjectPicker"),
+  localProjectList: document.querySelector("#localProjectList"),
+  localProjectNewButton: document.querySelector("#localProjectNewButton"),
+  localProjectCloseButton: document.querySelector("#localProjectCloseButton"),
   projectMenuButton: document.querySelector("#projectMenuButton"),
   projectMenuModal: document.querySelector("#projectMenuModal"),
   projectMenuCloseButton: document.querySelector("#projectMenuCloseButton"),
+  projectSettingsButton: document.querySelector("#projectSettingsButton"),
+  projectSettingsModal: document.querySelector("#projectSettingsModal"),
+  projectSettingsForm: document.querySelector("#projectSettingsForm"),
+  projectSettingsCancelButton: document.querySelector("#projectSettingsCancelButton"),
+  settingsPocketWidthInput: document.querySelector("#settingsPocketWidthInput"),
+  settingsPocketHeightInput: document.querySelector("#settingsPocketHeightInput"),
+  settingsGapXInput: document.querySelector("#settingsGapXInput"),
+  settingsGapYInput: document.querySelector("#settingsGapYInput"),
+  settingsAutoSaveInput: document.querySelector("#settingsAutoSaveInput"),
   menuAutoSaveInput: document.querySelector("#menuAutoSaveInput"),
   newProjectButton: document.querySelector("#newProjectButton"),
   newPageButton: document.querySelector("#newPageButton"),
   deleteProjectButton: document.querySelector("#deleteProjectButton"),
   saveLocalButton: document.querySelector("#saveLocalButton"),
+  loadLocalButton: document.querySelector("#loadLocalButton"),
   exportJsonButton: document.querySelector("#exportJsonButton"),
   importJsonButton: document.querySelector("#importJsonButton"),
   importJsonInput: document.querySelector("#importJsonInput"),
@@ -151,11 +177,13 @@ function createPage(title = "Page 1") {
 function createDefaultProject({ setupComplete = false } = {}) {
   const firstPage = createPage("Page 1");
   return {
+    id: createId(),
     name: "",
     rows: 3,
     cols: 3,
+    layout: { ...DEFAULT_PROJECT_LAYOUT },
     setupComplete,
-    localAutoSave: false,
+    localAutoSave: true,
     pages: [firstPage],
     cards: [],
     images: [],
@@ -185,6 +213,7 @@ function normalizeProject(input) {
   const legacyFirstPage = Array.isArray(input.pages) ? input.pages[0] : null;
   const rows = clampInteger(input.rows, 1, 8, clampInteger(legacyFirstPage?.rows, 1, 8, 3));
   const cols = clampInteger(input.cols, 1, 8, clampInteger(legacyFirstPage?.cols, 1, 8, 3));
+  const layout = normalizeProjectLayout(input);
 
   const normalizedImages = Array.isArray(input.images)
     ? input.images
@@ -206,14 +235,26 @@ function normalizeProject(input) {
     : [];
 
   return {
+    id: typeof input.id === "string" ? input.id : createId(),
     name: typeof input.name === "string" ? input.name : "",
     rows,
     cols,
+    layout,
     setupComplete: input.setupComplete === true,
-    localAutoSave: input.localAutoSave === true,
+    localAutoSave: input.localAutoSave !== false,
     pages: pages.length ? pages : fallback.pages,
     cards,
     images,
+  };
+}
+
+function normalizeProjectLayout(input) {
+  const layout = input?.layout && typeof input.layout === "object" ? input.layout : input;
+  return {
+    pocketWidth: clampNumber(layout?.pocketWidth, 10, 300, DEFAULT_PROJECT_LAYOUT.pocketWidth),
+    pocketHeight: clampNumber(layout?.pocketHeight, 10, 300, DEFAULT_PROJECT_LAYOUT.pocketHeight),
+    gapX: clampNumber(layout?.gapX, 0, 100, DEFAULT_PROJECT_LAYOUT.gapX),
+    gapY: clampNumber(layout?.gapY, 0, 100, DEFAULT_PROJECT_LAYOUT.gapY),
   };
 }
 
@@ -326,6 +367,29 @@ function getProjectGrid() {
   };
 }
 
+function getProjectLayout() {
+  return normalizeProjectLayout(state.project);
+}
+
+function getGridDimensions(grid, layout = getProjectLayout()) {
+  return {
+    width: grid.cols * layout.pocketWidth + Math.max(0, grid.cols - 1) * layout.gapX,
+    height: grid.rows * layout.pocketHeight + Math.max(0, grid.rows - 1) * layout.gapY,
+  };
+}
+
+function getPlacementDimensions(colSpan, rowSpan, layout = getProjectLayout()) {
+  return {
+    width: colSpan * layout.pocketWidth + Math.max(0, colSpan - 1) * layout.gapX,
+    height: rowSpan * layout.pocketHeight + Math.max(0, rowSpan - 1) * layout.gapY,
+  };
+}
+
+function getPlacementAspect(colSpan, rowSpan, layout = getProjectLayout()) {
+  const dimensions = getPlacementDimensions(colSpan, rowSpan, layout);
+  return dimensions.width / dimensions.height;
+}
+
 function getCurrentPageIndex() {
   const index = state.project.pages.findIndex((page) => page.id === state.currentPageId);
   return index >= 0 ? index : 0;
@@ -421,6 +485,7 @@ function resetTransientProjectState() {
   state.selectedCardId = null;
   state.selectedPlacementId = null;
   state.setupInitialized = false;
+  state.projectSetupRequested = false;
   state.cardSearchResults = [];
   state.cardSearchLoading = false;
   state.cardInsertSearchResults = [];
@@ -429,6 +494,8 @@ function resetTransientProjectState() {
   state.imageImportIndex = 0;
   state.pendingCardSlot = null;
   state.placementClipboard = null;
+  state.draggedCardResult = null;
+  state.draggedCardAssetId = null;
   state.imagePlacementDraft = null;
   state.pendingImagePlacement = null;
   state.hoveredSlot = null;
@@ -445,14 +512,22 @@ function resetTransientProjectState() {
   state.indexedDbSavePending = false;
 }
 
-function startNewProject() {
-  if (!window.confirm("Create a new project? Export or Save Local first if you need the current one.")) {
+function ensureProjectId(project = state.project) {
+  if (!project.id) {
+    project.id = createId();
+  }
+  return project.id;
+}
+
+function startNewProject({ confirm = true } = {}) {
+  if (confirm && !window.confirm("Create a new project? Export or Save Local first if you need the current one.")) {
     return;
   }
 
   state.project = createDefaultProject();
   state.currentPageId = state.project.pages[0].id;
   resetTransientProjectState();
+  state.projectSetupRequested = true;
   saveProject("New project ready");
   renderAll();
 }
@@ -465,6 +540,9 @@ async function deleteProject() {
   let localDeleteFailed = false;
   try {
     const db = await openProjectDatabase();
+    if (state.project.id) {
+      await deleteIndexedDbRecord(db, state.project.id);
+    }
     await deleteIndexedDbRecord(db, INDEXED_DB_CURRENT_PROJECT_ID);
     db.close();
   } catch (error) {
@@ -505,6 +583,7 @@ function saveProject(message = "Saved") {
 
 function saveProjectToLocalStorageBestEffort() {
   try {
+    ensureProjectId();
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state.project));
     localStorage.setItem(CURRENT_PAGE_KEY, state.currentPageId);
   } catch (error) {
@@ -534,6 +613,116 @@ function openProjectMenuModal() {
 
 function closeProjectMenuModal() {
   els.projectMenuModal.hidden = true;
+}
+
+function openProjectSettingsModal() {
+  const layout = getProjectLayout();
+  els.settingsPocketWidthInput.value = layout.pocketWidth;
+  els.settingsPocketHeightInput.value = layout.pocketHeight;
+  els.settingsGapXInput.value = layout.gapX;
+  els.settingsGapYInput.value = layout.gapY;
+  els.settingsAutoSaveInput.checked = state.project.localAutoSave === true;
+  els.projectSettingsModal.hidden = false;
+  window.setTimeout(() => {
+    els.settingsPocketWidthInput.focus();
+  }, 0);
+}
+
+function closeProjectSettingsModal() {
+  els.projectSettingsModal.hidden = true;
+}
+
+function saveProjectSettings() {
+  state.project.layout = normalizeProjectLayout({
+    pocketWidth: els.settingsPocketWidthInput.value,
+    pocketHeight: els.settingsPocketHeightInput.value,
+    gapX: els.settingsGapXInput.value,
+    gapY: els.settingsGapYInput.value,
+  });
+  state.project.localAutoSave = els.settingsAutoSaveInput.checked;
+  closeProjectSettingsModal();
+  saveProject("Project settings updated");
+  if (state.project.localAutoSave) {
+    saveProjectToIndexedDb("Project settings updated");
+  }
+  renderAll();
+}
+
+function openHelpModal() {
+  els.helpModal.hidden = false;
+  window.setTimeout(() => {
+    els.helpCloseButton.focus();
+  }, 0);
+}
+
+function closeHelpModal() {
+  els.helpModal.hidden = true;
+}
+
+function openLocalProjectPicker() {
+  els.localProjectPicker.hidden = false;
+  window.setTimeout(() => {
+    els.localProjectList.querySelector("button")?.focus();
+  }, 0);
+}
+
+function closeLocalProjectPicker() {
+  els.localProjectPicker.hidden = true;
+}
+
+function renderLocalProjectPicker() {
+  els.localProjectList.replaceChildren();
+  if (!state.localProjectChoices.length) {
+    const empty = document.createElement("div");
+    empty.className = "empty-state";
+    empty.textContent = "No local projects";
+    els.localProjectList.append(empty);
+    return;
+  }
+
+  state.localProjectChoices.forEach((record) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "local-project-item";
+    const savedText = record.savedAt ? new Date(record.savedAt).toLocaleString() : "Unknown save time";
+    button.innerHTML = `<span></span><small></small>`;
+    button.querySelector("span").textContent = record.name || "Untitled Binder";
+    button.querySelector("small").textContent = savedText;
+    button.addEventListener("click", () => {
+      loadLocalProject(record.id);
+    });
+    els.localProjectList.append(button);
+  });
+}
+
+async function loadLocalProject(projectId) {
+  try {
+    const db = await openProjectDatabase();
+    const record = await getIndexedDbRecord(db, projectId);
+    if (!record?.project) {
+      db.close();
+      setStatus("Local project not found");
+      return;
+    }
+
+    state.project = normalizeProject(record.project);
+    state.currentPageId = record.currentPageId || state.project.pages[0]?.id || null;
+    resetTransientProjectState();
+    state.indexedDbSavedAt = record.savedAt || null;
+    saveProjectToLocalStorageBestEffort();
+    await putIndexedDbRecord(db, {
+      id: INDEXED_DB_CURRENT_PROJECT_ID,
+      currentProjectId: ensureProjectId(),
+      savedAt: record.savedAt || new Date().toISOString(),
+    });
+    db.close();
+    closeLocalProjectPicker();
+    setStatus(`Loaded ${state.project.name || "local project"}`);
+    renderAll();
+  } catch (error) {
+    console.warn("Could not load local project.", error);
+    setStatus("Local project load failed");
+  }
 }
 
 function openProjectDatabase() {
@@ -567,10 +756,20 @@ async function saveProjectToIndexedDb(message = "Saved local", { quiet = false }
   try {
     const db = await openProjectDatabase();
     const savedAt = new Date().toISOString();
+    const projectId = ensureProjectId();
+    const projectCopy = JSON.parse(JSON.stringify(state.project));
+    projectCopy.id = projectId;
+    await putIndexedDbRecord(db, {
+      id: projectId,
+      name: projectCopy.name || "Untitled Binder",
+      savedAt,
+      currentPageId: state.currentPageId,
+      project: projectCopy,
+    });
     await putIndexedDbRecord(db, {
       id: INDEXED_DB_CURRENT_PROJECT_ID,
+      currentProjectId: projectId,
       savedAt,
-      project: JSON.parse(JSON.stringify(state.project)),
     });
     db.close();
     state.indexedDbSavedAt = savedAt;
@@ -587,6 +786,14 @@ async function saveProjectToIndexedDb(message = "Saved local", { quiet = false }
 }
 
 function queueIndexedDbAutoSave() {
+  if (!state.project.localAutoSave) {
+    if (state.indexedDbAutoSaveTimer) {
+      window.clearTimeout(state.indexedDbAutoSaveTimer);
+      state.indexedDbAutoSaveTimer = null;
+    }
+    return;
+  }
+
   if (state.indexedDbAutoSaveTimer) {
     window.clearTimeout(state.indexedDbAutoSaveTimer);
   }
@@ -608,24 +815,69 @@ function putIndexedDbRecord(db, record) {
 
 async function hydrateProjectFromIndexedDbIfNeeded() {
   try {
-    const db = await openProjectDatabase();
-    const record = await getIndexedDbRecord(db, INDEXED_DB_CURRENT_PROJECT_ID);
-    db.close();
-    if (!record?.project) {
-      return;
-    }
-
-    state.project = normalizeProject(record.project);
-    state.currentPageId = state.project.pages[0]?.id || null;
-    state.selectedImageId = state.project.images[0]?.id || null;
-    state.selectedCardId = state.project.cards[0]?.id || null;
-    state.selectedPlacementId = null;
-    state.indexedDbSavedAt = record.savedAt || null;
-    setStatus("Loaded local project");
-    renderAll();
+    await refreshLocalProjectChoices({ openWhenAvailable: true });
   } catch (error) {
     console.warn("Could not load IndexedDB project.", error);
   }
+}
+
+async function refreshLocalProjectChoices({ openWhenAvailable = false } = {}) {
+  const db = await openProjectDatabase();
+  await migrateLegacyCurrentProjectRecord(db);
+  const records = await getIndexedDbProjectRecords(db);
+  db.close();
+  state.localProjectChoices = records;
+  renderLocalProjectPicker();
+  if (openWhenAvailable && records.length) {
+    openLocalProjectPicker();
+  }
+  return records;
+}
+
+async function migrateLegacyCurrentProjectRecord(db) {
+  const currentRecord = await getIndexedDbRecord(db, INDEXED_DB_CURRENT_PROJECT_ID);
+  if (!currentRecord?.project) {
+    return;
+  }
+
+  const project = normalizeProject(currentRecord.project);
+  const projectId = ensureProjectId(project);
+  const savedAt = currentRecord.savedAt || new Date().toISOString();
+  await putIndexedDbRecord(db, {
+    id: projectId,
+    name: project.name || "Untitled Binder",
+    savedAt,
+    currentPageId: currentRecord.currentPageId || project.pages[0]?.id || null,
+    project,
+  });
+  await putIndexedDbRecord(db, {
+    id: INDEXED_DB_CURRENT_PROJECT_ID,
+    currentProjectId: projectId,
+    savedAt,
+  });
+}
+
+async function getIndexedDbProjectRecords(db) {
+  const records = await getAllIndexedDbRecords(db);
+  return records
+    .filter((record) => record?.id !== INDEXED_DB_CURRENT_PROJECT_ID && record?.project)
+    .map((record) => ({
+      id: record.id,
+      name: record.project?.name || record.name || "Untitled Binder",
+      savedAt: record.savedAt || null,
+      currentPageId: record.currentPageId || record.project?.pages?.[0]?.id || null,
+      project: record.project,
+    }))
+    .sort((a, b) => String(b.savedAt || "").localeCompare(String(a.savedAt || "")));
+}
+
+function getAllIndexedDbRecords(db) {
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction(INDEXED_DB_STORE, "readonly");
+    const request = transaction.objectStore(INDEXED_DB_STORE).getAll();
+    request.addEventListener("success", () => resolve(request.result || []));
+    request.addEventListener("error", () => reject(request.error));
+  });
 }
 
 function getIndexedDbRecord(db, id) {
@@ -672,6 +924,7 @@ function bindEvents() {
     });
     state.project.setupComplete = true;
     state.setupInitialized = false;
+    state.projectSetupRequested = false;
     saveProject("Project created");
     renderAll();
   });
@@ -686,6 +939,37 @@ function bindEvents() {
   els.projectMenuModal.addEventListener("click", (event) => {
     if (event.target === els.projectMenuModal) {
       closeProjectMenuModal();
+    }
+  });
+  els.projectSettingsButton.addEventListener("click", () => {
+    closeProjectMenuModal();
+    openProjectSettingsModal();
+  });
+  els.projectSettingsForm.addEventListener("submit", (event) => {
+    event.preventDefault();
+    saveProjectSettings();
+  });
+  els.projectSettingsCancelButton.addEventListener("click", closeProjectSettingsModal);
+  els.projectSettingsModal.addEventListener("click", (event) => {
+    if (event.target === els.projectSettingsModal) {
+      closeProjectSettingsModal();
+    }
+  });
+  els.helpButton.addEventListener("click", openHelpModal);
+  els.helpCloseButton.addEventListener("click", closeHelpModal);
+  els.helpModal.addEventListener("click", (event) => {
+    if (event.target === els.helpModal) {
+      closeHelpModal();
+    }
+  });
+  els.localProjectNewButton.addEventListener("click", () => {
+    closeLocalProjectPicker();
+    startNewProject({ confirm: false });
+  });
+  els.localProjectCloseButton.addEventListener("click", closeLocalProjectPicker);
+  els.localProjectPicker.addEventListener("click", (event) => {
+    if (event.target === els.localProjectPicker) {
+      closeLocalProjectPicker();
     }
   });
   els.menuAutoSaveInput.addEventListener("change", () => {
@@ -705,6 +989,20 @@ function bindEvents() {
   els.saveLocalButton.addEventListener("click", async (event) => {
     closeProjectMenuModal();
     await saveProjectToIndexedDb("Saved local");
+  });
+  els.loadLocalButton.addEventListener("click", async () => {
+    closeProjectMenuModal();
+    try {
+      const records = await refreshLocalProjectChoices();
+      if (records.length) {
+        openLocalProjectPicker();
+      } else {
+        setStatus("No local projects found");
+      }
+    } catch (error) {
+      console.warn("Could not list local projects.", error);
+      setStatus("Local project list failed");
+    }
   });
 
   els.deleteProjectButton.addEventListener("click", async (event) => {
@@ -893,19 +1191,34 @@ function bindEvents() {
       return;
     }
 
-    if (shortcut && !editingText && key === "v") {
-      event.preventDefault();
+    if (shortcut && !editingText && key === "v" && state.placementClipboard) {
       const targetSlot = state.hoveredSlot || state.pendingCardSlot;
-      if (targetSlot) {
-        pastePlacementClipboard(targetSlot.pageId, targetSlot.row, targetSlot.col);
-      } else {
-        setStatus("Hover a target slot before pasting");
+      if (!targetSlot) {
+        return;
       }
+
+      event.preventDefault();
+      pastePlacementClipboard(targetSlot.pageId, targetSlot.row, targetSlot.col);
       return;
     }
 
     if (event.key === "Escape" && !els.projectMenuModal.hidden) {
       closeProjectMenuModal();
+      return;
+    }
+
+    if (event.key === "Escape" && !els.projectSettingsModal.hidden) {
+      closeProjectSettingsModal();
+      return;
+    }
+
+    if (event.key === "Escape" && !els.helpModal.hidden) {
+      closeHelpModal();
+      return;
+    }
+
+    if (event.key === "Escape" && !els.localProjectPicker.hidden) {
+      closeLocalProjectPicker();
       return;
     }
 
@@ -962,12 +1275,18 @@ function renderAll() {
 
 function renderProjectControls() {
   const grid = getProjectGrid();
-  els.projectSetup.hidden = state.project.setupComplete;
+  const layout = getProjectLayout();
+  els.projectSetup.hidden = state.project.setupComplete || !state.projectSetupRequested;
   els.projectNameInput.value = state.project.name;
-  els.projectBinderSummary.textContent = `Binder: ${grid.rows} rows x ${grid.cols} columns`;
+  els.projectBinderSummary.textContent =
+    `Binder: ${grid.rows} rows x ${grid.cols} columns, pockets ${formatLayoutNumber(layout.pocketWidth)} x ${formatLayoutNumber(layout.pocketHeight)}, gaps ${formatLayoutNumber(layout.gapX)} x ${formatLayoutNumber(layout.gapY)}`;
   els.saveLocalButton.disabled = state.indexedDbSavePending;
   els.menuAutoSaveInput.checked = state.project.localAutoSave === true;
   els.localSaveSummary.textContent = getLocalSaveSummary();
+}
+
+function formatLayoutNumber(value) {
+  return Number(value).toFixed(1).replace(/\.0$/, "");
 }
 
 function renderSetupControls() {
@@ -1448,6 +1767,7 @@ function renderCardSearchControls() {
     const result = document.createElement("button");
     result.type = "button";
     result.className = "card-result";
+    result.draggable = true;
     result.innerHTML = `<img alt=""><span><strong></strong><span></span><span></span></span>`;
     result.querySelector("img").src = imageUrl;
     result.querySelector("img").alt = card.name;
@@ -1456,7 +1776,24 @@ function renderCardSearchControls() {
     detailLines[0].textContent = card.localId ? `Local #${card.localId}` : "No local number";
     detailLines[1].textContent = card.id || "";
     result.addEventListener("click", async () => {
-      await importTcgdexCardArt(card);
+      const cardAsset = await importTcgdexCardArt(card, {
+        statusElement: els.cardSearchStatus,
+        renderAfterImport: false,
+      });
+      if (cardAsset) {
+        setCardPlacementClipboard(cardAsset);
+      }
+    });
+    result.addEventListener("dragstart", (event) => {
+      state.draggedCardResult = card;
+      event.dataTransfer.effectAllowed = "copy";
+      event.dataTransfer.setData("text/plain", card.name || "TCGdex card");
+      event.dataTransfer.setData("application/x-michi-card-id", card.id || "");
+      result.classList.add("dragging");
+    });
+    result.addEventListener("dragend", () => {
+      state.draggedCardResult = null;
+      result.classList.remove("dragging");
     });
     els.cardSearchResults.append(result);
   });
@@ -1666,37 +2003,44 @@ function compressImageToDataUrl(image, maxWidth) {
 
 function renderCardLibrary() {
   els.cardLibrary.replaceChildren();
+  els.cardLibrary.hidden = !state.project.cards.length;
 
   if (!state.project.cards.length) {
-    const empty = document.createElement("div");
-    empty.className = "empty-state";
-    empty.textContent = "No cards imported";
-    els.cardLibrary.append(empty);
     return;
   }
 
   state.project.cards.forEach((card) => {
     const item = document.createElement("div");
     item.className = `library-item${card.id === state.selectedCardId ? " selected" : ""}`;
+    item.draggable = true;
     item.tabIndex = 0;
     item.setAttribute("role", "button");
-    item.setAttribute("aria-label", `Select ${card.name}`);
+    item.setAttribute("aria-label", `Copy ${card.name} to placement clipboard`);
     item.innerHTML = `<img alt=""><span></span>`;
     item.querySelector("img").src = card.dataUrl;
     item.querySelector("img").alt = card.name;
     item.querySelector("span").textContent = card.name;
     item.addEventListener("click", () => {
-      state.selectedCardId = card.id;
+      setCardPlacementClipboard(card);
       renderCardLibrary();
-      setStatus(`Selected card ${card.name}`);
     });
     item.addEventListener("keydown", (event) => {
       if (event.key === "Enter" || event.key === " ") {
         event.preventDefault();
-        state.selectedCardId = card.id;
+        setCardPlacementClipboard(card);
         renderCardLibrary();
-        setStatus(`Selected card ${card.name}`);
       }
+    });
+    item.addEventListener("dragstart", (event) => {
+      state.draggedCardAssetId = card.id;
+      event.dataTransfer.effectAllowed = "copy";
+      event.dataTransfer.setData("text/plain", card.name || "Imported card");
+      event.dataTransfer.setData("application/x-michi-card-asset-id", card.id);
+      item.classList.add("dragging");
+    });
+    item.addEventListener("dragend", () => {
+      state.draggedCardAssetId = null;
+      item.classList.remove("dragging");
     });
     els.cardLibrary.append(item);
   });
@@ -1875,7 +2219,8 @@ function renderImagePlacementModal() {
   els.imagePlacementName.textContent = image.name;
   els.imagePlacementTitle.textContent = draft.mode === "edit" ? "Edit Placement" : "Place Image";
   els.imagePlacementStartButton.textContent = draft.mode === "edit" ? "Save Changes" : "Place on Page";
-  els.imagePlacementPreview.style.aspectRatio = `${draft.colSpan * CARD_ASPECT} / ${draft.rowSpan}`;
+  const placementDimensions = getPlacementDimensions(draft.colSpan, draft.rowSpan);
+  els.imagePlacementPreview.style.aspectRatio = `${placementDimensions.width} / ${placementDimensions.height}`;
   const previewMetrics = setImagePlacementPreviewSize(draft);
   els.imagePlacementPreview.replaceChildren();
 
@@ -1905,7 +2250,7 @@ function renderImagePlacementModal() {
 }
 
 function setImagePlacementPreviewSize(draft) {
-  const ratio = (draft.colSpan * CARD_ASPECT) / draft.rowSpan;
+  const ratio = getPlacementAspect(draft.colSpan, draft.rowSpan);
   const stageWidth = Math.round(Math.min(680, Math.max(380, window.innerWidth - 120)));
   const stageHeight = Math.round(Math.min(460, Math.max(300, window.innerHeight * 0.48)));
   const frameMaxWidth = stageWidth * 0.62;
@@ -2038,19 +2383,9 @@ function savePlacementDraftChanges() {
     return;
   }
 
-  const overlapping = page.placements.filter(
-    (candidate) => candidate.id !== placement.id && placementsOverlap(candidate, nextPlacement),
+  page.placements = page.placements.map((candidate) =>
+    candidate.id === placement.id ? nextPlacement : candidate,
   );
-  if (
-    overlapping.length &&
-    !window.confirm(`Replace ${overlapping.length} overlapping placement${overlapping.length > 1 ? "s" : ""}?`)
-  ) {
-    return;
-  }
-
-  page.placements = page.placements
-    .filter((candidate) => candidate.id !== placement.id && !placementsOverlap(candidate, nextPlacement))
-    .concat(nextPlacement);
   state.imagePlacementDraft = null;
   state.selectedPlacementId = nextPlacement.id;
   saveProject("Placement updated");
@@ -2141,7 +2476,7 @@ function setHoveredSlot(slot) {
     state.hoveredSlot?.row !== slot.row ||
     state.hoveredSlot?.col !== slot.col;
   state.hoveredSlot = slot;
-  if (changed && state.pendingImagePlacement) {
+  if (changed && (state.pendingImagePlacement || state.placementClipboard)) {
     renderBinder();
   }
 }
@@ -2156,7 +2491,7 @@ function clearHoveredSlot(pageId, row, col) {
   }
 
   state.hoveredSlot = null;
-  if (state.pendingImagePlacement) {
+  if (state.pendingImagePlacement || state.placementClipboard) {
     renderBinder();
   }
 }
@@ -2177,33 +2512,54 @@ function getPendingImageHoverPlacement(pageId) {
   };
 }
 
+function getClipboardHoverPlacement(pageId) {
+  const clipboard = state.placementClipboard;
+  if (!clipboard || state.hoveredSlot?.pageId !== pageId) {
+    return null;
+  }
+
+  return {
+    id: "clipboard-placement-preview",
+    imageId: clipboard.placement.imageId,
+    row: state.hoveredSlot.row,
+    col: state.hoveredSlot.col,
+    rowSpan: clipboard.placement.rowSpan,
+    colSpan: clipboard.placement.colSpan,
+    crop: normalizeCrop(clipboard.placement.crop),
+  };
+}
+
 function placeCardInPendingSlot(cardId) {
   const pendingSlot = state.pendingCardSlot;
   if (!pendingSlot) return;
 
+  placeCardAtSlot(cardId, pendingSlot.pageId, pendingSlot.row, pendingSlot.col);
+}
+
+function placeCardAtSlot(cardId, pageId, row, col) {
   const card = getCard(cardId);
-  const page = state.project.pages.find((candidate) => candidate.id === pendingSlot.pageId);
-  if (!card || !page) return;
+  const page = state.project.pages.find((candidate) => candidate.id === pageId);
+  if (!card || !page) {
+    setStatus("Card could not be placed");
+    return false;
+  }
 
   const nextPlacement = {
     id: createId(),
     imageId: card.id,
-    row: pendingSlot.row,
-    col: pendingSlot.col,
+    row,
+    col,
     rowSpan: 1,
     colSpan: 1,
     crop: { ...DEFAULT_CROP },
   };
 
-  const overlapping = page.placements.filter((placement) => placementsOverlap(placement, nextPlacement));
-  if (
-    overlapping.length &&
-    !window.confirm(`Replace ${overlapping.length} overlapping placement${overlapping.length > 1 ? "s" : ""}?`)
-  ) {
-    return;
+  const overlapPlan = confirmPlacementOverlapPlan(page, nextPlacement, { allowLayerOnImages: true });
+  if (!overlapPlan) {
+    return false;
   }
 
-  page.placements = page.placements.filter((placement) => !placementsOverlap(placement, nextPlacement));
+  removePlannedOverlaps(page, overlapPlan);
   page.placements.push(nextPlacement);
   state.currentPageId = page.id;
   state.selectedCardId = card.id;
@@ -2211,6 +2567,7 @@ function placeCardInPendingSlot(cardId) {
   state.pendingCardSlot = null;
   saveProject("Card placed");
   renderAll();
+  return true;
 }
 
 function renderBinder() {
@@ -2246,7 +2603,8 @@ function estimatePreviewNaturalHeight(grid) {
   const sheetHorizontalPadding = 48;
   const spineAndGap = 42;
   const gridWidth = maxPageWidth - sheetHorizontalPadding - spineAndGap;
-  const gridHeight = gridWidth / (grid.cols * CARD_ASPECT / grid.rows);
+  const gridDimensions = getGridDimensions(grid);
+  const gridHeight = gridWidth / (gridDimensions.width / gridDimensions.height);
   return Math.round(10 + 37 + 48 + gridHeight);
 }
 
@@ -2279,9 +2637,13 @@ function createPagePreview(page, grid) {
 
   const binderGrid = document.createElement("div");
   binderGrid.className = "binder-grid";
+  const layout = getProjectLayout();
+  const gridDimensions = getGridDimensions(grid, layout);
   binderGrid.style.gridTemplateColumns = `repeat(${grid.cols}, minmax(0, 1fr))`;
   binderGrid.style.gridTemplateRows = `repeat(${grid.rows}, minmax(0, 1fr))`;
-  binderGrid.style.aspectRatio = `${grid.cols * CARD_ASPECT} / ${grid.rows}`;
+  binderGrid.style.aspectRatio = `${gridDimensions.width} / ${gridDimensions.height}`;
+  binderGrid.style.columnGap = `${(layout.gapX / gridDimensions.width) * 100}%`;
+  binderGrid.style.rowGap = `${(layout.gapY / gridDimensions.height) * 100}%`;
 
   for (let row = 0; row < grid.rows; row += 1) {
     for (let col = 0; col < grid.cols; col += 1) {
@@ -2303,6 +2665,36 @@ function createPagePreview(page, grid) {
       pocket.addEventListener("blur", () => {
         clearHoveredSlot(page.id, row, col);
       });
+      pocket.addEventListener("dragover", (event) => {
+        if (!state.draggedCardResult && !state.draggedCardAssetId) return;
+        event.preventDefault();
+        event.dataTransfer.dropEffect = "copy";
+        setHoveredSlot({ pageId: page.id, row, col });
+        pocket.classList.add("dragover");
+      });
+      pocket.addEventListener("dragleave", () => {
+        pocket.classList.remove("dragover");
+        clearHoveredSlot(page.id, row, col);
+      });
+      pocket.addEventListener("drop", async (event) => {
+        if (!state.draggedCardResult && !state.draggedCardAssetId) return;
+        event.preventDefault();
+        event.stopPropagation();
+        pocket.classList.remove("dragover");
+        const card = state.draggedCardResult;
+        const cardAssetId = state.draggedCardAssetId;
+        state.draggedCardResult = null;
+        state.draggedCardAssetId = null;
+        const cardAsset = cardAssetId
+          ? getCard(cardAssetId)
+          : await importTcgdexCardArt(card, {
+              statusElement: els.cardSearchStatus,
+              renderAfterImport: false,
+            });
+        if (cardAsset) {
+          placeCardAtSlot(cardAsset.id, page.id, row, col);
+        }
+      });
       pocket.addEventListener("click", (event) => {
         event.stopPropagation();
         if (state.placementClipboard) {
@@ -2321,37 +2713,45 @@ function createPagePreview(page, grid) {
 
   const hoverPlacement = getPendingImageHoverPlacement(page.id);
   if (hoverPlacement) {
-    const hover = document.createElement("div");
-    hover.className = `placement-target-preview${placementFits(hoverPlacement, grid.rows, grid.cols) ? "" : " invalid"}`;
-    hover.style.gridRow = `${hoverPlacement.row + 1} / span ${hoverPlacement.rowSpan}`;
-    hover.style.gridColumn = `${hoverPlacement.col + 1} / span ${hoverPlacement.colSpan}`;
-    binderGrid.append(hover);
+    const hover = createPlacementPreviewBlock(hoverPlacement, grid, layout);
+    if (hover) {
+      binderGrid.append(hover);
+    }
   }
 
-  page.placements.forEach((placement) => {
-    const image = getImage(placement.imageId);
-    if (!image) return;
+  const clipboardHoverPlacement = getClipboardHoverPlacement(page.id);
+  if (clipboardHoverPlacement) {
+    const hover = createPlacementPreviewBlock(clipboardHoverPlacement, grid, layout);
+    if (hover) {
+      binderGrid.append(hover);
+    }
+  }
+
+  getSegmentedPlacementRenderEntries(page).forEach((entry) => {
+    const { placement, image, segment, segmentIndex, segmentCount, renderIndex } = entry;
+    const gridPlacement = segment || placement;
+    const showPlacementControls = !segment || segmentIndex === 0;
 
     const item = document.createElement("button");
     item.type = "button";
-    item.className = `placement${placement.id === state.selectedPlacementId ? " selected" : ""}`;
-    item.style.gridRow = `${placement.row + 1} / span ${placement.rowSpan}`;
-    item.style.gridColumn = `${placement.col + 1} / span ${placement.colSpan}`;
-    item.setAttribute("aria-label", `${image.name}, page ${pageNumber}, row ${placement.row + 1}, column ${placement.col + 1}`);
+    item.className = [
+      "placement",
+      segment ? "placement-segment" : "",
+      segmentCount > 1 ? "segmented" : "",
+      showPlacementControls ? "" : "placement-controls-hidden",
+      placement.id === state.selectedPlacementId ? "selected" : "",
+    ]
+      .filter(Boolean)
+      .join(" ");
+    item.style.gridRow = `${gridPlacement.row + 1} / span ${gridPlacement.rowSpan}`;
+    item.style.gridColumn = `${gridPlacement.col + 1} / span ${gridPlacement.colSpan}`;
+    item.style.zIndex = String(20 + renderIndex);
+    item.setAttribute(
+      "aria-label",
+      `${image.name}${segmentCount > 1 ? " segment" : ""}, page ${pageNumber}, row ${gridPlacement.row + 1}, column ${gridPlacement.col + 1}`,
+    );
 
-    const imageLayer = document.createElement("span");
-    imageLayer.className = "placement-image-layer";
-    const frameRatio = (placement.colSpan * CARD_ASPECT) / placement.rowSpan;
-    const layerSize = getPlacementLayerPercentSize(image, frameRatio);
-    imageLayer.style.width = `${layerSize.width}%`;
-    imageLayer.style.height = `${layerSize.height}%`;
-
-    const img = document.createElement("img");
-    img.src = image.dataUrl;
-    img.alt = image.name;
-    img.style.transform = cropToTransform(placement.crop);
-    imageLayer.append(img);
-    item.append(imageLayer);
+    item.append(createPlacementImageLayer(image, placement, layout, segment));
 
     const badge = document.createElement("span");
     badge.className = "placement-badge";
@@ -2364,8 +2764,8 @@ function createPagePreview(page, grid) {
     trash.title = "Delete from layout";
     item.append(trash);
 
-    const isCardPlacement = state.project.cards.some((card) => card.id === placement.imageId);
-    if (!isCardPlacement) {
+    const placementIsCard = isCardPlacement(placement);
+    if (!placementIsCard) {
       const edit = document.createElement("span");
       edit.className = "placement-edit";
       edit.textContent = "✎";
@@ -2373,6 +2773,66 @@ function createPagePreview(page, grid) {
       edit.title = "Edit placement";
       item.append(edit);
     }
+
+    item.addEventListener("mousemove", (event) => {
+      if (
+        !state.pendingImagePlacement &&
+        !state.placementClipboard &&
+        !state.draggedCardResult &&
+        !state.draggedCardAssetId
+      ) {
+        return;
+      }
+      const slot = getSlotFromBinderGridEvent(event, binderGrid, grid);
+      if (slot) {
+        setHoveredSlot({ pageId: page.id, row: slot.row, col: slot.col });
+      }
+    });
+
+    item.addEventListener("mouseleave", () => {
+      item.classList.remove("dragover");
+      const hovered = state.hoveredSlot;
+      if (hovered?.pageId === page.id) {
+        clearHoveredSlot(hovered.pageId, hovered.row, hovered.col);
+      }
+    });
+
+    item.addEventListener("dragover", (event) => {
+      if (!state.draggedCardResult && !state.draggedCardAssetId) return;
+      event.preventDefault();
+      event.dataTransfer.dropEffect = "copy";
+      const slot = getSlotFromBinderGridEvent(event, binderGrid, grid);
+      if (slot) {
+        setHoveredSlot({ pageId: page.id, row: slot.row, col: slot.col });
+        item.classList.add("dragover");
+      }
+    });
+
+    item.addEventListener("drop", async (event) => {
+      if (!state.draggedCardResult && !state.draggedCardAssetId) return;
+      event.preventDefault();
+      event.stopPropagation();
+      item.classList.remove("dragover");
+      const slot = getSlotFromBinderGridEvent(event, binderGrid, grid);
+      if (!slot) {
+        setStatus("Drop on a card slot");
+        return;
+      }
+
+      const card = state.draggedCardResult;
+      const cardAssetId = state.draggedCardAssetId;
+      state.draggedCardResult = null;
+      state.draggedCardAssetId = null;
+      const cardAsset = cardAssetId
+        ? getCard(cardAssetId)
+        : await importTcgdexCardArt(card, {
+            statusElement: els.cardSearchStatus,
+            renderAfterImport: false,
+          });
+      if (cardAsset) {
+        placeCardAtSlot(cardAsset.id, page.id, slot.row, slot.col);
+      }
+    });
 
     item.addEventListener("click", (event) => {
       event.stopPropagation();
@@ -2382,10 +2842,30 @@ function createPagePreview(page, grid) {
       }
 
       if (event.target.closest(".placement-edit")) {
-        if (isCardPlacement) {
+        if (placementIsCard) {
           return;
         }
         openPlacementEditModal(page.id, placement.id);
+        return;
+      }
+
+      if (state.pendingImagePlacement) {
+        const slot = getSlotFromBinderGridEvent(event, binderGrid, grid);
+        if (slot) {
+          placePendingImage(page.id, slot.row, slot.col);
+        } else {
+          setStatus("Click inside a card slot to place the image");
+        }
+        return;
+      }
+
+      if (state.placementClipboard) {
+        const slot = getSlotFromBinderGridEvent(event, binderGrid, grid);
+        if (slot) {
+          pastePlacementClipboard(page.id, slot.row, slot.col);
+        } else {
+          setStatus("Click inside a card slot to paste");
+        }
         return;
       }
 
@@ -2400,6 +2880,48 @@ function createPagePreview(page, grid) {
   sheet.append(binderGrid);
   wrapper.append(sheet);
   return wrapper;
+}
+
+function createPlacementPreviewBlock(placement, grid, layout) {
+  const image = getImage(placement.imageId);
+  if (!image) return null;
+
+  const item = document.createElement("div");
+  item.className = `placement clipboard-preview${placementFits(placement, grid.rows, grid.cols) ? "" : " invalid"}`;
+  item.style.gridRow = `${placement.row + 1} / span ${placement.rowSpan}`;
+  item.style.gridColumn = `${placement.col + 1} / span ${placement.colSpan}`;
+
+  item.append(createPlacementImageLayer(image, placement, layout));
+  return item;
+}
+
+function createPlacementImageLayer(image, placement, layout, segment = null) {
+  const imageLayer = document.createElement("span");
+  imageLayer.className = "placement-image-layer";
+  const frameRatio = getPlacementAspect(placement.colSpan, placement.rowSpan, layout);
+  const layerSize = getPlacementLayerPercentSize(image, frameRatio);
+
+  if (segment) {
+    const fullDimensions = getPlacementDimensions(placement.colSpan, placement.rowSpan, layout);
+    const segmentDimensions = getPlacementDimensions(segment.colSpan, segment.rowSpan, layout);
+    const offsetX = segment.sourceCol * (layout.pocketWidth + layout.gapX);
+    const offsetY = segment.sourceRow * (layout.pocketHeight + layout.gapY);
+
+    imageLayer.style.left = `${((fullDimensions.width / 2 - offsetX) / segmentDimensions.width) * 100}%`;
+    imageLayer.style.top = `${((fullDimensions.height / 2 - offsetY) / segmentDimensions.height) * 100}%`;
+    imageLayer.style.width = `${(fullDimensions.width * layerSize.width) / segmentDimensions.width}%`;
+    imageLayer.style.height = `${(fullDimensions.height * layerSize.height) / segmentDimensions.height}%`;
+  } else {
+    imageLayer.style.width = `${layerSize.width}%`;
+    imageLayer.style.height = `${layerSize.height}%`;
+  }
+
+  const img = document.createElement("img");
+  img.src = image.dataUrl;
+  img.alt = image.name || "";
+  img.style.transform = cropToTransform(placement.crop);
+  imageLayer.append(img);
+  return imageLayer;
 }
 
 function cropToTransform(crop) {
@@ -2437,17 +2959,12 @@ function placePendingImage(pageId, row, col) {
     return;
   }
 
-  // Placements are grid rectangles. New rectangles must fit the page and either avoid
-  // overlap or replace the existing overlapping rectangles after confirmation.
-  const overlapping = page.placements.filter((placement) => placementsOverlap(placement, nextPlacement));
-  if (
-    overlapping.length &&
-    !window.confirm(`Replace ${overlapping.length} overlapping placement${overlapping.length > 1 ? "s" : ""}?`)
-  ) {
+  const overlapPlan = confirmPlacementOverlapPlan(page, nextPlacement, { allowLayerOnImages: true });
+  if (!overlapPlan) {
     return;
   }
 
-  page.placements = page.placements.filter((placement) => !placementsOverlap(placement, nextPlacement));
+  removePlannedOverlaps(page, overlapPlan);
   page.placements.push(nextPlacement);
   state.selectedPlacementId = nextPlacement.id;
   state.pendingImagePlacement = null;
@@ -2471,6 +2988,218 @@ function placementsOverlap(a, b) {
     a.row < b.row + b.rowSpan &&
     a.row + a.rowSpan > b.row
   );
+}
+
+function isCardAssetId(imageId) {
+  return state.project.cards.some((card) => card.id === imageId);
+}
+
+function isCardPlacement(placement) {
+  return isCardAssetId(placement?.imageId);
+}
+
+function isImagePlacement(placement) {
+  return Boolean(getImage(placement?.imageId)) && !isCardPlacement(placement);
+}
+
+function getPlacementsInRenderOrder(page) {
+  return page.placements
+    .map((placement, index) => ({ placement, index }))
+    .sort((a, b) => Number(isCardPlacement(a.placement)) - Number(isCardPlacement(b.placement)) || a.index - b.index)
+    .map((entry) => entry.placement);
+}
+
+function getSegmentedPlacementRenderEntries(page) {
+  const orderedPlacements = getPlacementsInRenderOrder(page);
+  const orderedEntries = orderedPlacements.map((placement, renderIndex) => ({
+    placement,
+    image: getImage(placement.imageId),
+    isCard: isCardPlacement(placement),
+    renderIndex,
+  }));
+
+  return orderedEntries.flatMap((entry, index) => {
+    if (!entry.image) return [];
+    if (entry.isCard || !isImagePlacement(entry.placement)) {
+      return [{ ...entry, segment: null, segmentIndex: 0, segmentCount: 1 }];
+    }
+
+    const higherPlacements = orderedEntries
+      .slice(index + 1)
+      .map((candidate) => candidate.placement)
+      .filter((placement) => placementsOverlap(placement, entry.placement));
+    const segments = getVisiblePlacementSegments(entry.placement, higherPlacements);
+
+    if (!segments.length) {
+      return [];
+    }
+
+    return segments.map((segment, segmentIndex) => ({
+      ...entry,
+      segment,
+      segmentIndex,
+      segmentCount: segments.length,
+    }));
+  });
+}
+
+function getVisiblePlacementSegments(placement, blockers) {
+  const rows = placement.rowSpan;
+  const cols = placement.colSpan;
+  const visible = Array.from({ length: rows }, () => Array.from({ length: cols }, () => true));
+
+  blockers.forEach((blocker) => {
+    const rowStart = Math.max(placement.row, blocker.row);
+    const rowEnd = Math.min(placement.row + placement.rowSpan, blocker.row + blocker.rowSpan);
+    const colStart = Math.max(placement.col, blocker.col);
+    const colEnd = Math.min(placement.col + placement.colSpan, blocker.col + blocker.colSpan);
+
+    for (let row = rowStart; row < rowEnd; row += 1) {
+      for (let col = colStart; col < colEnd; col += 1) {
+        visible[row - placement.row][col - placement.col] = false;
+      }
+    }
+  });
+
+  const visited = Array.from({ length: rows }, () => Array.from({ length: cols }, () => false));
+  const segments = [];
+
+  for (let row = 0; row < rows; row += 1) {
+    for (let col = 0; col < cols; col += 1) {
+      if (!visible[row][col] || visited[row][col]) continue;
+
+      let colSpan = 1;
+      while (col + colSpan < cols && visible[row][col + colSpan] && !visited[row][col + colSpan]) {
+        colSpan += 1;
+      }
+
+      let rowSpan = 1;
+      while (row + rowSpan < rows) {
+        let canExtend = true;
+        for (let scanCol = col; scanCol < col + colSpan; scanCol += 1) {
+          if (!visible[row + rowSpan][scanCol] || visited[row + rowSpan][scanCol]) {
+            canExtend = false;
+            break;
+          }
+        }
+        if (!canExtend) break;
+        rowSpan += 1;
+      }
+
+      for (let markRow = row; markRow < row + rowSpan; markRow += 1) {
+        for (let markCol = col; markCol < col + colSpan; markCol += 1) {
+          visited[markRow][markCol] = true;
+        }
+      }
+
+      segments.push({
+        row: placement.row + row,
+        col: placement.col + col,
+        rowSpan,
+        colSpan,
+        sourceRow: row,
+        sourceCol: col,
+      });
+    }
+  }
+
+  return segments;
+}
+
+function confirmPlacementOverlapPlan(page, nextPlacement, options = {}) {
+  const ignoredIds = new Set(options.ignoredPlacementIds || []);
+  const overlapping = page.placements.filter(
+    (placement) => !ignoredIds.has(placement.id) && placementsOverlap(placement, nextPlacement),
+  );
+  const canLayerOnImages = options.allowLayerOnImages || (options.allowCardOnImages && isCardPlacement(nextPlacement));
+  const layeredImageOverlaps = canLayerOnImages ? overlapping.filter(isImagePlacement) : [];
+  const replaceOverlaps = canLayerOnImages
+    ? overlapping.filter((placement) => !isImagePlacement(placement))
+    : overlapping;
+
+  if (layeredImageOverlaps.length) {
+    const assetKind = isCardPlacement(nextPlacement) ? "card" : "image";
+    const replaceText = replaceOverlaps.length
+      ? ` This will also replace ${formatPlacementCount(replaceOverlaps.length, "overlapping placement")}.`
+      : "";
+    if (
+      !window.confirm(
+        `Place this ${assetKind} on top of ${formatPlacementCount(layeredImageOverlaps.length, "image placement")}? This breaks the lower image into binder-page segments.${replaceText}`,
+      )
+    ) {
+      return null;
+    }
+  } else if (
+    replaceOverlaps.length &&
+    !window.confirm(`Replace ${formatPlacementCount(replaceOverlaps.length, "overlapping placement")}?`)
+  ) {
+    return null;
+  }
+
+  return { replaceOverlaps };
+}
+
+function formatPlacementCount(count, label) {
+  return `${count} ${label}${count === 1 ? "" : "s"}`;
+}
+
+function removePlannedOverlaps(page, overlapPlan) {
+  const removeIds = new Set(overlapPlan.replaceOverlaps.map((placement) => placement.id));
+  if (!removeIds.size) return;
+  page.placements = page.placements.filter((placement) => !removeIds.has(placement.id));
+}
+
+function getSlotFromBinderGridEvent(event, binderGrid, grid) {
+  const bounds = binderGrid.getBoundingClientRect();
+  if (!bounds.width || !bounds.height) return null;
+
+  const relativeX = event.clientX - bounds.left;
+  const relativeY = event.clientY - bounds.top;
+  if (relativeX < 0 || relativeY < 0 || relativeX > bounds.width || relativeY > bounds.height) {
+    return null;
+  }
+
+  const layout = getProjectLayout();
+  const gridDimensions = getGridDimensions(grid, layout);
+  const gapX = ((layout.gapX || 0) / gridDimensions.width) * bounds.width;
+  const gapY = ((layout.gapY || 0) / gridDimensions.height) * bounds.height;
+  const slotWidth = (bounds.width - gapX * (grid.cols - 1)) / grid.cols;
+  const slotHeight = (bounds.height - gapY * (grid.rows - 1)) / grid.rows;
+  const stepX = slotWidth + gapX;
+  const stepY = slotHeight + gapY;
+  const col = clampInteger(Math.floor(relativeX / stepX), 0, grid.cols - 1, 0);
+  const row = clampInteger(Math.floor(relativeY / stepY), 0, grid.rows - 1, 0);
+  const withinSlotX = relativeX - col * stepX;
+  const withinSlotY = relativeY - row * stepY;
+  const gapTolerance = 4;
+
+  if (withinSlotX > slotWidth + gapTolerance || withinSlotY > slotHeight + gapTolerance) {
+    return null;
+  }
+
+  return { row, col };
+}
+
+function setCardPlacementClipboard(cardAsset) {
+  if (!cardAsset) return false;
+
+  state.placementClipboard = {
+    mode: "copy",
+    sourcePageId: null,
+    sourcePlacementId: null,
+    assetName: cardAsset.name,
+    placement: {
+      imageId: cardAsset.id,
+      rowSpan: 1,
+      colSpan: 1,
+      crop: { ...DEFAULT_CROP },
+    },
+  };
+  state.selectedCardId = cardAsset.id;
+  setStatus(`Copied ${cardAsset.name}. Click a target slot to paste.`);
+  renderCardLibrary();
+  renderCardInsertPrompt();
+  return true;
 }
 
 function copySelectedPlacement(mode = "copy") {
@@ -2524,18 +3253,12 @@ function pastePlacementClipboard(pageId, row, col) {
     return false;
   }
 
-  const overlapping = page.placements.filter((placement) => {
-    const isCutSource =
-      clipboard.mode === "cut" &&
-      clipboard.sourcePageId === page.id &&
-      clipboard.sourcePlacementId === placement.id;
-    return !isCutSource && placementsOverlap(placement, nextPlacement);
+  const overlapPlan = confirmPlacementOverlapPlan(page, nextPlacement, {
+    allowLayerOnImages: true,
+    ignoredPlacementIds:
+      clipboard.mode === "cut" && clipboard.sourcePageId === page.id ? [clipboard.sourcePlacementId] : [],
   });
-
-  if (
-    overlapping.length &&
-    !window.confirm(`Replace ${overlapping.length} overlapping placement${overlapping.length > 1 ? "s" : ""}?`)
-  ) {
+  if (!overlapPlan) {
     return false;
   }
 
@@ -2548,7 +3271,7 @@ function pastePlacementClipboard(pageId, row, col) {
     }
   }
 
-  page.placements = page.placements.filter((placement) => !placementsOverlap(placement, nextPlacement));
+  removePlannedOverlaps(page, overlapPlan);
   page.placements.push(nextPlacement);
   state.currentPageId = page.id;
   state.selectedPlacementId = nextPlacement.id;
@@ -2560,7 +3283,7 @@ function pastePlacementClipboard(pageId, row, col) {
 }
 
 function getAssetKind(asset) {
-  return state.project.cards.some((card) => card.id === asset?.id) ? "card" : "image";
+  return isCardAssetId(asset?.id) ? "card" : "image";
 }
 
 function deletePlacement(pageId, placementId, { confirmDelete = true } = {}) {
@@ -2572,7 +3295,8 @@ function deletePlacement(pageId, placementId, { confirmDelete = true } = {}) {
   const assetKind = getAssetKind(asset);
   if (
     confirmDelete &&
-    !window.confirm(`Delete this ${assetKind} from the layout? The asset stays in your library.`)
+    assetKind !== "card" &&
+    !window.confirm(`Delete this ${assetKind} from the layout?`)
   ) {
     return false;
   }
@@ -2781,17 +3505,20 @@ function getSpreadExportName(pages) {
 
 async function renderSpreadToCanvas(pages) {
   const grid = getProjectGrid();
-  const slotWidth = 180;
-  const slotHeight = slotWidth / CARD_ASPECT;
-  const gap = 10;
+  const layout = getProjectLayout();
+  const exportScale = 180 / DEFAULT_PROJECT_LAYOUT.pocketWidth;
+  const slotWidth = layout.pocketWidth * exportScale;
+  const slotHeight = layout.pocketHeight * exportScale;
+  const gapX = layout.gapX * exportScale;
+  const gapY = layout.gapY * exportScale;
   const padding = 28;
   const outerPadding = 28;
   const spreadGap = 26;
   const titleHeight = 68;
   const spineWidth = 28;
   const spineGap = 18;
-  const gridWidth = grid.cols * slotWidth + (grid.cols - 1) * gap;
-  const gridHeight = grid.rows * slotHeight + (grid.rows - 1) * gap;
+  const gridWidth = grid.cols * slotWidth + (grid.cols - 1) * gapX;
+  const gridHeight = grid.rows * slotHeight + (grid.rows - 1) * gapY;
   const pageWidth = Math.round(padding * 2 + spineWidth + spineGap + gridWidth);
   const pageHeight = Math.round(titleHeight + padding * 2 + gridHeight);
   const canvasWidth = Math.round(outerPadding * 2 + pages.length * pageWidth + (pages.length - 1) * spreadGap);
@@ -2818,7 +3545,8 @@ async function renderSpreadToCanvas(pages) {
       pageHeight,
       slotWidth,
       slotHeight,
-      gap,
+      gapX,
+      gapY,
       padding,
       titleHeight,
       spineWidth,
@@ -2838,7 +3566,8 @@ async function drawPageToCanvas(ctx, page, pageX, pageY, metrics, imageCache) {
     pageWidth,
     slotWidth,
     slotHeight,
-    gap,
+    gapX,
+    gapY,
     padding,
     titleHeight,
     spineWidth,
@@ -2892,25 +3621,39 @@ async function drawPageToCanvas(ctx, page, pageX, pageY, metrics, imageCache) {
 
   for (let row = 0; row < rows; row += 1) {
     for (let col = 0; col < cols; col += 1) {
-      const x = gridX + col * (slotWidth + gap);
-      const y = gridY + row * (slotHeight + gap);
+      const x = gridX + col * (slotWidth + gapX);
+      const y = gridY + row * (slotHeight + gapY);
       drawPocket(ctx, x, y, slotWidth, slotHeight);
     }
   }
 
-  for (const placement of page.placements) {
-    const image = getImage(placement.imageId);
-    if (!image) continue;
-    if (!imageCache.has(image.id)) {
-      imageCache.set(image.id, await loadCanvasImage(image.dataUrl));
+  for (const entry of getSegmentedPlacementRenderEntries(page)) {
+    if (!imageCache.has(entry.image.id)) {
+      imageCache.set(entry.image.id, await loadCanvasImage(entry.image.dataUrl));
     }
 
-    const x = gridX + placement.col * (slotWidth + gap);
-    const y = gridY + placement.row * (slotHeight + gap);
-    const width = placement.colSpan * slotWidth + (placement.colSpan - 1) * gap;
-    const height = placement.rowSpan * slotHeight + (placement.rowSpan - 1) * gap;
-    drawPlacement(ctx, imageCache.get(image.id), placement.crop, x, y, width, height);
+    const fullBounds = getCanvasPlacementBounds(entry.placement, gridX, gridY, metrics);
+    const visibleBounds = entry.segment
+      ? getCanvasPlacementBounds(entry.segment, gridX, gridY, metrics)
+      : fullBounds;
+    drawPlacementSegment(
+      ctx,
+      imageCache.get(entry.image.id),
+      entry.placement.crop,
+      fullBounds,
+      visibleBounds,
+    );
   }
+}
+
+function getCanvasPlacementBounds(placement, gridX, gridY, metrics) {
+  const { slotWidth, slotHeight, gapX, gapY } = metrics;
+  return {
+    x: gridX + placement.col * (slotWidth + gapX),
+    y: gridY + placement.row * (slotHeight + gapY),
+    width: placement.colSpan * slotWidth + (placement.colSpan - 1) * gapX,
+    height: placement.rowSpan * slotHeight + (placement.rowSpan - 1) * gapY,
+  };
 }
 
 function drawPocket(ctx, x, y, width, height) {
@@ -2922,35 +3665,39 @@ function drawPocket(ctx, x, y, width, height) {
   ctx.stroke();
 }
 
-function drawPlacement(ctx, image, crop, x, y, width, height) {
+function drawPlacementSegment(ctx, image, crop, fullBounds, visibleBounds) {
   const safeCrop = normalizeCrop(crop);
-  roundRectPath(ctx, x, y, width, height, 7);
+  roundRectPath(ctx, visibleBounds.x, visibleBounds.y, visibleBounds.width, visibleBounds.height, 7);
   ctx.save();
   ctx.clip();
   ctx.fillStyle = "#ece7dc";
-  ctx.fillRect(x, y, width, height);
+  ctx.fillRect(visibleBounds.x, visibleBounds.y, visibleBounds.width, visibleBounds.height);
 
   // The PNG exporter mirrors the browser preview by drawing a cover-fit image into
-  // a clipped slot rectangle, then applying the saved zoom/position/rotation.
+  // a clipped rectangle, then applying the saved zoom/position/rotation from the
+  // original placement. Segments stay aligned as pieces of the same full image.
   const imageRatio = image.naturalWidth / image.naturalHeight;
-  const targetRatio = width / height;
-  let drawWidth = width;
-  let drawHeight = height;
+  const targetRatio = fullBounds.width / fullBounds.height;
+  let drawWidth = fullBounds.width;
+  let drawHeight = fullBounds.height;
   if (imageRatio > targetRatio) {
-    drawHeight = height;
-    drawWidth = height * imageRatio;
+    drawHeight = fullBounds.height;
+    drawWidth = fullBounds.height * imageRatio;
   } else {
-    drawWidth = width;
-    drawHeight = width / imageRatio;
+    drawWidth = fullBounds.width;
+    drawHeight = fullBounds.width / imageRatio;
   }
 
-  ctx.translate(x + width / 2 + (safeCrop.x / 100) * drawWidth, y + height / 2 + (safeCrop.y / 100) * drawHeight);
+  ctx.translate(
+    fullBounds.x + fullBounds.width / 2 + (safeCrop.x / 100) * drawWidth,
+    fullBounds.y + fullBounds.height / 2 + (safeCrop.y / 100) * drawHeight,
+  );
   ctx.rotate((safeCrop.rotate * Math.PI) / 180);
   ctx.scale(safeCrop.scale, safeCrop.scale);
   ctx.drawImage(image, -drawWidth / 2, -drawHeight / 2, drawWidth, drawHeight);
   ctx.restore();
 
-  roundRectPath(ctx, x, y, width, height, 7);
+  roundRectPath(ctx, visibleBounds.x, visibleBounds.y, visibleBounds.width, visibleBounds.height, 7);
   ctx.strokeStyle = "rgba(55, 61, 67, 0.35)";
   ctx.lineWidth = 1;
   ctx.stroke();
