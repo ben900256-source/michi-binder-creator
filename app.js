@@ -144,6 +144,7 @@ const els = {
   imageOverlapText: document.querySelector("#imageOverlapText"),
   imageOverlapOverButton: document.querySelector("#imageOverlapOverButton"),
   imageOverlapUnderButton: document.querySelector("#imageOverlapUnderButton"),
+  imageOverlapReplaceButton: document.querySelector("#imageOverlapReplaceButton"),
   imageOverlapCancelButton: document.querySelector("#imageOverlapCancelButton"),
   helpButton: document.querySelector("#helpButton"),
   helpModal: document.querySelector("#helpModal"),
@@ -173,7 +174,7 @@ const els = {
   exportJsonButton: document.querySelector("#exportJsonButton"),
   importJsonButton: document.querySelector("#importJsonButton"),
   importJsonInput: document.querySelector("#importJsonInput"),
-  exportSettingsButton: document.querySelector("#exportSettingsButton"),
+  exportButton: document.querySelector("#exportButton"),
   exportSettingsModal: document.querySelector("#exportSettingsModal"),
   exportSettingsForm: document.querySelector("#exportSettingsForm"),
   exportSettingsCancelButton: document.querySelector("#exportSettingsCancelButton"),
@@ -744,7 +745,7 @@ function syncExportSettingsControls() {
   updateExportSettingsControlState();
 }
 
-function saveExportSettingsFromControls() {
+function saveExportSettingsFromControls({ closeModal = true, statusMessage = "Export settings saved" } = {}) {
   state.exportSettings = normalizeExportSettings({
     pageRange: els.exportPageRangeInput.value.trim(),
     includePageTitles: els.exportIncludeTitlesInput.checked,
@@ -753,8 +754,12 @@ function saveExportSettingsFromControls() {
     printNeededCardsGreyscale: els.exportNeededGreyscaleInput.checked,
   });
   persistExportSettings();
-  closeExportSettingsModal();
-  setStatus("Export settings saved");
+  if (closeModal) {
+    closeExportSettingsModal();
+  }
+  if (statusMessage) {
+    setStatus(statusMessage);
+  }
 }
 
 function updateExportSettingsControlState() {
@@ -1285,6 +1290,9 @@ function bindEvents() {
   els.imageOverlapUnderButton.addEventListener("click", () => {
     resolveImageOverlapChoice("underlap");
   });
+  els.imageOverlapReplaceButton.addEventListener("click", () => {
+    resolveImageOverlapChoice("replace");
+  });
   els.imageOverlapCancelButton.addEventListener("click", () => {
     resolveImageOverlapChoice("cancel");
   });
@@ -1308,7 +1316,7 @@ function bindEvents() {
     els.importJsonInput.click();
   });
   els.importJsonInput.addEventListener("change", importProjectJson);
-  els.exportSettingsButton.addEventListener("click", openExportSettingsModal);
+  els.exportButton.addEventListener("click", openExportSettingsModal);
   els.exportSettingsCancelButton.addEventListener("click", closeExportSettingsModal);
   els.exportSettingsModal.addEventListener("click", (event) => {
     if (event.target === els.exportSettingsModal) {
@@ -1317,12 +1325,16 @@ function bindEvents() {
   });
   els.exportSettingsForm.addEventListener("submit", (event) => {
     event.preventDefault();
-    saveExportSettingsFromControls();
+    saveExportSettingsFromControls({ closeModal: false });
   });
   els.exportIncludeAllCardsInput.addEventListener("change", updateExportSettingsControlState);
   els.exportIncludeNeededCardsInput.addEventListener("change", updateExportSettingsControlState);
-  els.exportPngButton.addEventListener("click", exportCurrentPagePng);
-  els.exportPdfButton.addEventListener("click", exportCutSheetPdf);
+  els.exportPngButton.addEventListener("click", () => {
+    exportFromModal("png");
+  });
+  els.exportPdfButton.addEventListener("click", () => {
+    exportFromModal("pdf");
+  });
 
   els.fitToDisplayInput.addEventListener("change", () => {
     state.fitToDisplay = els.fitToDisplayInput.checked;
@@ -2622,7 +2634,7 @@ function requestImageOverlapChoice(overlappingPlacements) {
   return new Promise((resolve) => {
     state.imageOverlapChoiceResolver = resolve;
     els.imageOverlapText.textContent =
-      `This image overlaps ${formatPlacementCount(overlappingPlacements.length, "existing placement")}. Choose whether the new image should sit over or under the existing layout.`;
+      `This placement overlaps ${formatPlacementCount(overlappingPlacements.length, "existing placement")}. Choose whether the new item should sit over, sit under, or replace the existing layout.`;
     els.imageOverlapModal.hidden = false;
     window.setTimeout(() => {
       els.imageOverlapOverButton.focus();
@@ -3662,11 +3674,16 @@ async function confirmPlacementOverlapPlan(page, nextPlacement, options = {}) {
   const overlapping = page.placements.filter(
     (placement) => !ignoredIds.has(placement.id) && placementsOverlap(placement, nextPlacement),
   );
-  const nextIsImage = isImagePlacement(nextPlacement);
-  if (nextIsImage && options.allowLayerOnImages && overlapping.length) {
+  if (options.allowLayerOnImages && overlapping.length) {
     const choice = await requestImageOverlapChoice(overlapping);
     if (choice === "cancel") {
       return null;
+    }
+    if (choice === "replace") {
+      return {
+        replaceOverlaps: overlapping,
+        overlapping,
+      };
     }
     return {
       replaceOverlaps: [],
@@ -4346,9 +4363,35 @@ async function importProjectJson() {
   }
 }
 
-async function exportCurrentPagePng() {
+async function exportFromModal(format) {
+  saveExportSettingsFromControls({ closeModal: false, statusMessage: "" });
   const settings = getExportSettings();
   const pageSelection = getExportPageSelection(settings);
+  if (pageSelection.error) {
+    setStatus(pageSelection.error);
+    els.exportPageRangeInput.focus();
+    return;
+  }
+  if (!pageSelection.pages.length) {
+    setStatus("No pages to export");
+    return;
+  }
+  if (format === "pdf" && !getProjectPdfCutouts(settings, pageSelection).length) {
+    setStatus("No matching cutouts to export");
+    return;
+  }
+
+  closeExportSettingsModal();
+  if (format === "png") {
+    await exportCurrentPagePng({ settings, pageSelection });
+  } else {
+    await exportCutSheetPdf({ settings, pageSelection });
+  }
+}
+
+async function exportCurrentPagePng(options = {}) {
+  const settings = options.settings || getExportSettings();
+  const pageSelection = options.pageSelection || getExportPageSelection(settings);
   if (pageSelection.error) {
     openExportSettingsModal();
     setStatus(pageSelection.error);
@@ -4379,9 +4422,9 @@ async function exportCurrentPagePng() {
   }
 }
 
-async function exportCutSheetPdf() {
-  const settings = getExportSettings();
-  const pageSelection = getExportPageSelection(settings);
+async function exportCutSheetPdf(options = {}) {
+  const settings = options.settings || getExportSettings();
+  const pageSelection = options.pageSelection || getExportPageSelection(settings);
   if (pageSelection.error) {
     openExportSettingsModal();
     setStatus(pageSelection.error);
