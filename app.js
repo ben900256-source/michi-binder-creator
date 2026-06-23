@@ -43,6 +43,8 @@ const state = {
   imageImportIndex: 0,
   pendingCardSlot: null,
   placementClipboard: null,
+  imagePlacementDraft: null,
+  pendingImagePlacement: null,
   hoveredSlot: null,
   binderZoom: 1,
   fitToDisplay: true,
@@ -91,6 +93,16 @@ const els = {
   cardInsertSearchStatus: document.querySelector("#cardInsertSearchStatus"),
   cardInsertSearchResults: document.querySelector("#cardInsertSearchResults"),
   cardInsertCancelButton: document.querySelector("#cardInsertCancelButton"),
+  imagePlacementModal: document.querySelector("#imagePlacementModal"),
+  imagePlacementTitle: document.querySelector("#imagePlacementTitle"),
+  imagePlacementName: document.querySelector("#imagePlacementName"),
+  imagePlacementPreview: document.querySelector("#imagePlacementPreview"),
+  placementCropScaleInput: document.querySelector("#placementCropScaleInput"),
+  placementCropXInput: document.querySelector("#placementCropXInput"),
+  placementCropYInput: document.querySelector("#placementCropYInput"),
+  placementCropRotateInput: document.querySelector("#placementCropRotateInput"),
+  imagePlacementCancelButton: document.querySelector("#imagePlacementCancelButton"),
+  imagePlacementStartButton: document.querySelector("#imagePlacementStartButton"),
   projectMenuButton: document.querySelector("#projectMenuButton"),
   projectMenuModal: document.querySelector("#projectMenuModal"),
   projectMenuCloseButton: document.querySelector("#projectMenuCloseButton"),
@@ -430,6 +442,8 @@ function resetTransientProjectState() {
   state.imageImportIndex = 0;
   state.pendingCardSlot = null;
   state.placementClipboard = null;
+  state.imagePlacementDraft = null;
+  state.pendingImagePlacement = null;
   state.hoveredSlot = null;
   state.binderZoom = 1;
   state.fitToDisplay = true;
@@ -758,6 +772,20 @@ function bindEvents() {
     closeCardInsertPrompt();
   });
 
+  els.imagePlacementCancelButton.addEventListener("click", () => {
+    closeImagePlacementModal();
+  });
+
+  els.imagePlacementModal.addEventListener("click", (event) => {
+    if (event.target === els.imagePlacementModal) {
+      closeImagePlacementModal();
+    }
+  });
+
+  els.imagePlacementStartButton.addEventListener("click", () => {
+    startPendingImagePlacement();
+  });
+
   els.newPageButton.addEventListener("click", (event) => {
     closeParentDetails(event.currentTarget);
     addPage();
@@ -808,9 +836,28 @@ function bindEvents() {
   bindBinderPanZoom();
   bindSidebarResize();
 
-  els.spanSelect.addEventListener("change", renderSpanControls);
-  els.customSpanColsInput.addEventListener("change", renderSpanControls);
-  els.customSpanRowsInput.addEventListener("change", renderSpanControls);
+  els.spanSelect.addEventListener("change", () => {
+    updateImagePlacementDraftSpan();
+  });
+  els.customSpanColsInput.addEventListener("change", () => {
+    updateImagePlacementDraftSpan();
+  });
+  els.customSpanRowsInput.addEventListener("change", () => {
+    updateImagePlacementDraftSpan();
+  });
+
+  els.placementCropScaleInput.addEventListener("input", () =>
+    updateImagePlacementDraftCrop("scale", els.placementCropScaleInput.value),
+  );
+  els.placementCropXInput.addEventListener("input", () =>
+    updateImagePlacementDraftCrop("x", els.placementCropXInput.value),
+  );
+  els.placementCropYInput.addEventListener("input", () =>
+    updateImagePlacementDraftCrop("y", els.placementCropYInput.value),
+  );
+  els.placementCropRotateInput.addEventListener("change", () =>
+    updateImagePlacementDraftCrop("rotate", els.placementCropRotateInput.value),
+  );
 
   els.imageFileInput.addEventListener("change", async () => {
     await importImageFiles(Array.from(els.imageFileInput.files || []));
@@ -898,6 +945,19 @@ function bindEvents() {
       return;
     }
 
+    if (event.key === "Escape" && state.imagePlacementDraft) {
+      closeImagePlacementModal();
+      return;
+    }
+
+    if (event.key === "Escape" && state.pendingImagePlacement) {
+      state.pendingImagePlacement = null;
+      state.hoveredSlot = null;
+      setStatus("Image placement cancelled");
+      renderAll();
+      return;
+    }
+
     if (event.key === "Escape") {
       state.selectedPlacementId = null;
       renderAll();
@@ -923,6 +983,7 @@ function renderAll() {
   renderImageLibrary();
   renderBinder();
   renderCropControls();
+  renderImagePlacementModal();
   renderImageImportWizard();
   renderCardInsertPrompt();
 }
@@ -1632,10 +1693,14 @@ function renderImageLibrary() {
     item.tabIndex = 0;
     item.setAttribute("role", "button");
     item.setAttribute("aria-label", `Select ${image.name}`);
-    item.innerHTML = `<img alt=""><span></span><button type="button" class="rename-image-button">Rename</button>`;
+    item.innerHTML = `<img alt=""><span></span><button type="button" class="place-image-button">Place</button><button type="button" class="rename-image-button">Rename</button>`;
     item.querySelector("img").src = image.dataUrl;
     item.querySelector("img").alt = image.name;
     item.querySelector("span").textContent = image.name;
+    item.querySelector(".place-image-button").addEventListener("click", (event) => {
+      event.stopPropagation();
+      openImagePlacementModal(image.id);
+    });
     item.querySelector(".rename-image-button").addEventListener("click", (event) => {
       event.stopPropagation();
       renameImageAsset(image.id);
@@ -1674,6 +1739,207 @@ function renameImageAsset(imageId) {
 
   image.name = trimmedName;
   saveProject("Image renamed");
+  renderAll();
+}
+
+function openImagePlacementModal(imageId) {
+  const image = state.project.images.find((candidate) => candidate.id === imageId);
+  if (!image) return;
+
+  state.selectedImageId = image.id;
+  state.pendingImagePlacement = null;
+  state.imagePlacementDraft = {
+    mode: "new",
+    imageId: image.id,
+    colSpan: 1,
+    rowSpan: 1,
+    crop: { ...DEFAULT_CROP },
+  };
+  setSpanControlsFromDraft(state.imagePlacementDraft);
+  renderAll();
+}
+
+function setSpanControlsFromDraft(draft) {
+  const preset = Object.entries(SPAN_PRESETS).find(
+    ([, span]) => span.colSpan === draft.colSpan && span.rowSpan === draft.rowSpan,
+  );
+  els.spanSelect.value = preset ? preset[0] : "custom";
+  els.customSpanColsInput.value = String(draft.colSpan);
+  els.customSpanRowsInput.value = String(draft.rowSpan);
+}
+
+function openPlacementEditModal(pageId, placementId) {
+  const page = state.project.pages.find((candidate) => candidate.id === pageId);
+  const placement = page?.placements.find((candidate) => candidate.id === placementId);
+  const image = placement ? getImage(placement.imageId) : null;
+  if (!page || !placement || !image) return;
+
+  state.currentPageId = page.id;
+  state.selectedPlacementId = placement.id;
+  state.pendingImagePlacement = null;
+  state.imagePlacementDraft = {
+    mode: "edit",
+    pageId: page.id,
+    placementId: placement.id,
+    imageId: placement.imageId,
+    colSpan: placement.colSpan,
+    rowSpan: placement.rowSpan,
+    crop: normalizeCrop(placement.crop),
+  };
+  setSpanControlsFromDraft(state.imagePlacementDraft);
+  renderAll();
+}
+
+function closeImagePlacementModal() {
+  state.imagePlacementDraft = null;
+  renderAll();
+}
+
+function updateImagePlacementDraftSpan() {
+  if (!state.imagePlacementDraft) {
+    renderSpanControls();
+    return;
+  }
+
+  const span = getSelectedSpan();
+  state.imagePlacementDraft.colSpan = span.colSpan;
+  state.imagePlacementDraft.rowSpan = span.rowSpan;
+  renderImagePlacementModal();
+}
+
+function updateImagePlacementDraftCrop(key, value) {
+  if (!state.imagePlacementDraft) return;
+
+  state.imagePlacementDraft.crop = normalizeCrop({
+    ...normalizeCrop(state.imagePlacementDraft.crop),
+    [key]: key === "rotate" ? Number(value) : Number(value),
+  });
+  renderImagePlacementModal();
+}
+
+function renderImagePlacementModal() {
+  const draft = state.imagePlacementDraft;
+  els.imagePlacementModal.hidden = !draft;
+  renderSpanControls();
+  if (!draft) {
+    els.imagePlacementPreview.replaceChildren();
+    return;
+  }
+
+  const image = getImage(draft.imageId);
+  if (!image) {
+    closeImagePlacementModal();
+    return;
+  }
+
+  els.imagePlacementName.textContent = image.name;
+  els.imagePlacementTitle.textContent = draft.mode === "edit" ? "Edit Placement" : "Place Image";
+  els.imagePlacementStartButton.textContent = draft.mode === "edit" ? "Save Changes" : "Place on Page";
+  els.imagePlacementPreview.style.aspectRatio = `${draft.colSpan * CARD_ASPECT} / ${draft.rowSpan}`;
+  const previewMetrics = setImagePlacementPreviewSize(draft);
+  els.imagePlacementPreview.replaceChildren();
+
+  const frame = document.createElement("div");
+  frame.className = "placement-preview-frame";
+  frame.style.width = `${previewMetrics.frameWidth}px`;
+  frame.style.height = `${previewMetrics.frameHeight}px`;
+  frame.style.setProperty("--preview-cols", draft.colSpan);
+  frame.style.setProperty("--preview-rows", draft.rowSpan);
+
+  const img = document.createElement("img");
+  img.src = image.dataUrl;
+  img.alt = image.name;
+  img.style.width = `${previewMetrics.frameWidth}px`;
+  img.style.height = `${previewMetrics.frameHeight}px`;
+  img.style.transform = cropToTransform(draft.crop);
+  frame.append(img);
+  els.imagePlacementPreview.append(frame);
+
+  const crop = normalizeCrop(draft.crop);
+  els.placementCropScaleInput.value = crop.scale;
+  els.placementCropXInput.value = crop.x;
+  els.placementCropYInput.value = crop.y;
+  els.placementCropRotateInput.value = crop.rotate;
+}
+
+function setImagePlacementPreviewSize(draft) {
+  const ratio = (draft.colSpan * CARD_ASPECT) / draft.rowSpan;
+  const stageWidth = 380;
+  const stageHeight = 300;
+  const frameMaxWidth = stageWidth * 0.58;
+  const frameMaxHeight = stageHeight * 0.58;
+  let frameWidth = frameMaxWidth;
+  let frameHeight = frameWidth / ratio;
+  if (frameHeight > frameMaxHeight) {
+    frameHeight = frameMaxHeight;
+    frameWidth = frameHeight * ratio;
+  }
+
+  els.imagePlacementPreview.style.width = `${stageWidth}px`;
+  els.imagePlacementPreview.style.height = `${stageHeight}px`;
+  return {
+    frameWidth: Math.round(frameWidth),
+    frameHeight: Math.round(frameHeight),
+  };
+}
+
+function startPendingImagePlacement() {
+  const draft = state.imagePlacementDraft;
+  const image = draft ? getImage(draft.imageId) : null;
+  if (!draft || !image) return;
+
+  if (draft.mode === "edit") {
+    savePlacementDraftChanges();
+    return;
+  }
+
+  state.pendingImagePlacement = {
+    imageId: draft.imageId,
+    colSpan: draft.colSpan,
+    rowSpan: draft.rowSpan,
+    crop: normalizeCrop(draft.crop),
+  };
+  state.imagePlacementDraft = null;
+  setStatus(`Click a slot to place ${image.name}`);
+  renderAll();
+}
+
+function savePlacementDraftChanges() {
+  const draft = state.imagePlacementDraft;
+  if (!draft || draft.mode !== "edit") return;
+
+  const page = state.project.pages.find((candidate) => candidate.id === draft.pageId);
+  const placement = page?.placements.find((candidate) => candidate.id === draft.placementId);
+  if (!page || !placement) return;
+
+  const nextPlacement = {
+    ...placement,
+    colSpan: draft.colSpan,
+    rowSpan: draft.rowSpan,
+    crop: normalizeCrop(draft.crop),
+  };
+  const grid = getProjectGrid();
+  if (!placementFits(nextPlacement, grid.rows, grid.cols)) {
+    setStatus("Edited placement exceeds grid bounds");
+    return;
+  }
+
+  const overlapping = page.placements.filter(
+    (candidate) => candidate.id !== placement.id && placementsOverlap(candidate, nextPlacement),
+  );
+  if (
+    overlapping.length &&
+    !window.confirm(`Replace ${overlapping.length} overlapping placement${overlapping.length > 1 ? "s" : ""}?`)
+  ) {
+    return;
+  }
+
+  page.placements = page.placements
+    .filter((candidate) => candidate.id !== placement.id && !placementsOverlap(candidate, nextPlacement))
+    .concat(nextPlacement);
+  state.imagePlacementDraft = null;
+  state.selectedPlacementId = nextPlacement.id;
+  saveProject("Placement updated");
   renderAll();
 }
 
@@ -1753,6 +2019,48 @@ function closeCardInsertPrompt() {
   els.cardInsertSearchInput.value = "";
   els.cardInsertSearchStatus.textContent = "";
   renderAll();
+}
+
+function setHoveredSlot(slot) {
+  const changed =
+    state.hoveredSlot?.pageId !== slot.pageId ||
+    state.hoveredSlot?.row !== slot.row ||
+    state.hoveredSlot?.col !== slot.col;
+  state.hoveredSlot = slot;
+  if (changed && state.pendingImagePlacement) {
+    renderBinder();
+  }
+}
+
+function clearHoveredSlot(pageId, row, col) {
+  if (
+    state.hoveredSlot?.pageId !== pageId ||
+    state.hoveredSlot.row !== row ||
+    state.hoveredSlot.col !== col
+  ) {
+    return;
+  }
+
+  state.hoveredSlot = null;
+  if (state.pendingImagePlacement) {
+    renderBinder();
+  }
+}
+
+function getPendingImageHoverPlacement(pageId) {
+  if (!state.pendingImagePlacement || state.hoveredSlot?.pageId !== pageId) {
+    return null;
+  }
+
+  return {
+    id: "pending-image-placement-preview",
+    imageId: state.pendingImagePlacement.imageId,
+    row: state.hoveredSlot.row,
+    col: state.hoveredSlot.col,
+    rowSpan: state.pendingImagePlacement.rowSpan,
+    colSpan: state.pendingImagePlacement.colSpan,
+    crop: state.pendingImagePlacement.crop,
+  };
 }
 
 function placeCardInPendingSlot(cardId) {
@@ -1870,28 +2178,16 @@ function createPagePreview(page, grid) {
       pocket.style.gridColumn = `${col + 1} / span 1`;
       pocket.setAttribute("aria-label", `Page ${pageNumber}, slot row ${row + 1}, column ${col + 1}`);
       pocket.addEventListener("mouseenter", () => {
-        state.hoveredSlot = { pageId: page.id, row, col };
+        setHoveredSlot({ pageId: page.id, row, col });
       });
       pocket.addEventListener("mouseleave", () => {
-        if (
-          state.hoveredSlot?.pageId === page.id &&
-          state.hoveredSlot.row === row &&
-          state.hoveredSlot.col === col
-        ) {
-          state.hoveredSlot = null;
-        }
+        clearHoveredSlot(page.id, row, col);
       });
       pocket.addEventListener("focus", () => {
-        state.hoveredSlot = { pageId: page.id, row, col };
+        setHoveredSlot({ pageId: page.id, row, col });
       });
       pocket.addEventListener("blur", () => {
-        if (
-          state.hoveredSlot?.pageId === page.id &&
-          state.hoveredSlot.row === row &&
-          state.hoveredSlot.col === col
-        ) {
-          state.hoveredSlot = null;
-        }
+        clearHoveredSlot(page.id, row, col);
       });
       pocket.addEventListener("click", (event) => {
         event.stopPropagation();
@@ -1899,10 +2195,23 @@ function createPagePreview(page, grid) {
           pastePlacementClipboard(page.id, row, col);
           return;
         }
+        if (state.pendingImagePlacement) {
+          placePendingImage(page.id, row, col);
+          return;
+        }
         openCardInsertPrompt(page.id, row, col);
       });
       binderGrid.append(pocket);
     }
+  }
+
+  const hoverPlacement = getPendingImageHoverPlacement(page.id);
+  if (hoverPlacement) {
+    const hover = document.createElement("div");
+    hover.className = `placement-target-preview${placementFits(hoverPlacement, grid.rows, grid.cols) ? "" : " invalid"}`;
+    hover.style.gridRow = `${hoverPlacement.row + 1} / span ${hoverPlacement.rowSpan}`;
+    hover.style.gridColumn = `${hoverPlacement.col + 1} / span ${hoverPlacement.colSpan}`;
+    binderGrid.append(hover);
   }
 
   page.placements.forEach((placement) => {
@@ -1933,10 +2242,21 @@ function createPagePreview(page, grid) {
     trash.title = "Delete from layout";
     item.append(trash);
 
+    const edit = document.createElement("span");
+    edit.className = "placement-edit";
+    edit.textContent = "Edit";
+    edit.title = "Edit placement";
+    item.append(edit);
+
     item.addEventListener("click", (event) => {
       event.stopPropagation();
       if (event.target.closest(".placement-trash")) {
         deletePlacement(page.id, placement.id);
+        return;
+      }
+
+      if (event.target.closest(".placement-edit")) {
+        openPlacementEditModal(page.id, placement.id);
         return;
       }
 
@@ -2005,29 +2325,28 @@ function getSelectedSpan() {
   };
 }
 
-function placeSelectedImage(pageId, row, col) {
+function placePendingImage(pageId, row, col) {
   const page = state.project.pages.find((candidate) => candidate.id === pageId);
   if (!page) return;
   const grid = getProjectGrid();
   state.currentPageId = page.id;
 
-  if (!state.selectedImageId) {
+  if (!state.pendingImagePlacement) {
     state.selectedPlacementId = null;
     saveProject("Page selected");
     renderAll();
-    setStatus("Select an image first");
+    setStatus("Choose an image to place first");
     return;
   }
 
-  const span = getSelectedSpan();
   const nextPlacement = {
     id: createId(),
-    imageId: state.selectedImageId,
+    imageId: state.pendingImagePlacement.imageId,
     row,
     col,
-    rowSpan: span.rowSpan,
-    colSpan: span.colSpan,
-    crop: { ...DEFAULT_CROP },
+    rowSpan: state.pendingImagePlacement.rowSpan,
+    colSpan: state.pendingImagePlacement.colSpan,
+    crop: normalizeCrop(state.pendingImagePlacement.crop),
   };
 
   if (!placementFits(nextPlacement, grid.rows, grid.cols)) {
@@ -2048,6 +2367,7 @@ function placeSelectedImage(pageId, row, col) {
   page.placements = page.placements.filter((placement) => !placementsOverlap(placement, nextPlacement));
   page.placements.push(nextPlacement);
   state.selectedPlacementId = nextPlacement.id;
+  state.pendingImagePlacement = null;
   saveProject("Image placed");
   renderAll();
 }

@@ -64,6 +64,61 @@
       </div>
     </div>
 
+    <div id="imagePlacementModal" class="setup-overlay" hidden>
+      <div class="setup-card placement-card">
+        <h1 id="imagePlacementTitle">Place Image</h1>
+        <p id="imagePlacementName" class="status"></p>
+        <div id="imagePlacementPreview" class="placement-preview"></div>
+        <label class="field">
+          <span>Span</span>
+          <select id="spanSelect">
+            <option value="1x1">1 column x 1 row</option>
+            <option value="1x2">1 column x 2 rows</option>
+            <option value="2x1">2 columns x 1 row</option>
+            <option value="2x2">2 columns x 2 rows</option>
+            <option value="3x1">3 columns x 1 row</option>
+            <option value="1x3">1 column x 3 rows</option>
+            <option value="custom">Custom</option>
+          </select>
+        </label>
+        <div class="inline-fields">
+          <label class="field">
+            <span>Width</span>
+            <input id="customSpanColsInput" type="number" min="1" max="8" step="1" />
+          </label>
+          <label class="field">
+            <span>Height</span>
+            <input id="customSpanRowsInput" type="number" min="1" max="8" step="1" />
+          </label>
+        </div>
+        <label class="field">
+          <span>Zoom</span>
+          <input id="placementCropScaleInput" type="range" min="0.5" max="4" step="0.01" />
+        </label>
+        <label class="field">
+          <span>X</span>
+          <input id="placementCropXInput" type="range" min="-100" max="100" step="1" />
+        </label>
+        <label class="field">
+          <span>Y</span>
+          <input id="placementCropYInput" type="range" min="-100" max="100" step="1" />
+        </label>
+        <label class="field">
+          <span>Rotate</span>
+          <select id="placementCropRotateInput">
+            <option value="0">0</option>
+            <option value="90">90</option>
+            <option value="180">180</option>
+            <option value="270">270</option>
+          </select>
+        </label>
+        <div class="button-grid">
+          <button id="imagePlacementCancelButton" type="button">Cancel</button>
+          <button id="imagePlacementStartButton" type="button" class="primary">Place on Page</button>
+        </div>
+      </div>
+    </div>
+
     <div id="projectMenuModal" class="setup-overlay" hidden>
       <div class="setup-card menu-card">
         <h1>Project Menu</h1>
@@ -108,29 +163,13 @@
         </section>
 
         <section class="panel">
-          <h2>Placement</h2>
-          <label class="field">
-            <span>Span</span>
-            <select id="spanSelect">
-              <option value="1x1">1 column x 1 row</option>
-              <option value="1x2">1 column x 2 rows</option>
-              <option value="2x1">2 columns x 1 row</option>
-              <option value="2x2">2 columns x 2 rows</option>
-              <option value="3x1">3 columns x 1 row</option>
-              <option value="1x3">1 column x 3 rows</option>
-              <option value="custom">Custom</option>
-            </select>
+          <h2>Images</h2>
+          <label class="file-button">
+            <input id="imageFileInput" type="file" accept="image/*" multiple />
+            <span>Add Images</span>
           </label>
-          <div class="inline-fields">
-            <label class="field">
-              <span>Width</span>
-              <input id="customSpanColsInput" type="number" min="1" max="8" step="1" />
-            </label>
-            <label class="field">
-              <span>Height</span>
-              <input id="customSpanRowsInput" type="number" min="1" max="8" step="1" />
-            </label>
-          </div>
+          <div id="dropZone" class="drop-zone" tabindex="0">Drop or Paste Images</div>
+          <div id="imageLibrary" class="image-library"></div>
         </section>
 
         <section class="panel">
@@ -142,16 +181,6 @@
           <p id="cardSearchStatus" class="status" aria-live="polite"></p>
           <div id="cardSearchResults" class="card-results"></div>
           <div id="cardLibrary" class="image-library" hidden></div>
-        </section>
-
-        <section class="panel">
-          <h2>Images</h2>
-          <label class="file-button">
-            <input id="imageFileInput" type="file" accept="image/*" multiple />
-            <span>Add Images</span>
-          </label>
-          <div id="dropZone" class="drop-zone" tabindex="0">Drop or Paste Images</div>
-          <div id="imageLibrary" class="image-library"></div>
         </section>
 
         <section class="panel">
