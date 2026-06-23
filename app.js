@@ -15,6 +15,14 @@ const DEFAULT_PROJECT_LAYOUT = {
   gapX: 3.5,
   gapY: 3.5,
 };
+const PDF_PAGE_WIDTH_MM = 215.9;
+const PDF_PAGE_HEIGHT_MM = 279.4;
+const PDF_MARGIN_MM = 10;
+const PDF_CUTOUT_SPACING_MM = 4;
+const PDF_LABEL_HEIGHT_MM = 6;
+const PDF_LABEL_GAP_MM = 1.5;
+const PDF_IMAGE_PX_PER_MM = 6;
+const PDF_POINTS_PER_MM = 72 / 25.4;
 
 const DEFAULT_CROP = {
   scale: 1,
@@ -136,6 +144,7 @@ const els = {
   importJsonButton: document.querySelector("#importJsonButton"),
   importJsonInput: document.querySelector("#importJsonInput"),
   exportPngButton: document.querySelector("#exportPngButton"),
+  exportPdfButton: document.querySelector("#exportPdfButton"),
   statusText: document.querySelector("#statusText"),
   pageList: document.querySelector("#pageList"),
   binderZoomInput: document.querySelector("#binderZoomInput"),
@@ -1086,6 +1095,7 @@ function bindEvents() {
   });
   els.importJsonInput.addEventListener("change", importProjectJson);
   els.exportPngButton.addEventListener("click", exportCurrentPagePng);
+  els.exportPdfButton.addEventListener("click", exportCutSheetPdf);
 
   els.fitToDisplayInput.addEventListener("change", () => {
     state.fitToDisplay = els.fitToDisplayInput.checked;
@@ -3494,6 +3504,351 @@ async function exportCurrentPagePng() {
   } finally {
     els.exportPngButton.disabled = false;
   }
+}
+
+async function exportCutSheetPdf() {
+  const cutouts = getProjectPdfCutouts();
+  if (!cutouts.length) {
+    setStatus("No image cutouts to export");
+    return;
+  }
+
+  els.exportPdfButton.disabled = true;
+  setStatus("Rendering cut PDF");
+
+  try {
+    const packedPages = await packPdfCutouts(cutouts);
+    const pdfBlob = buildCutSheetPdf(packedPages);
+    downloadBlob(pdfBlob, `${safeFileName(state.project.name || "michi-binder")}-cut-sheets.pdf`);
+    setStatus("Cut PDF exported");
+  } catch (error) {
+    console.warn("Could not export cut PDF.", error);
+    setStatus("Cut PDF export failed");
+  } finally {
+    els.exportPdfButton.disabled = false;
+  }
+}
+
+function getProjectPdfCutouts() {
+  const layout = getProjectLayout();
+  const cutouts = [];
+
+  state.project.pages.forEach((page) => {
+    const pageNumber = getPageNumber(page);
+    getSegmentedPlacementRenderEntries(page).forEach((entry) => {
+      if (entry.isCard || !isImagePlacement(entry.placement)) return;
+
+      const visiblePlacement = entry.segment || entry.placement;
+      const fullDimensions = getPlacementDimensions(entry.placement.colSpan, entry.placement.rowSpan, layout);
+      const visibleDimensions = getPlacementDimensions(visiblePlacement.colSpan, visiblePlacement.rowSpan, layout);
+      const sourceOffsetX = entry.segment ? entry.segment.sourceCol * (layout.pocketWidth + layout.gapX) : 0;
+      const sourceOffsetY = entry.segment ? entry.segment.sourceRow * (layout.pocketHeight + layout.gapY) : 0;
+      const segmentText = entry.segmentCount > 1 ? ` segment ${entry.segmentIndex + 1}/${entry.segmentCount}` : "";
+
+      cutouts.push({
+        id: `${page.id}-${entry.placement.id}-${entry.segmentIndex}`,
+        image: entry.image,
+        crop: normalizeCrop(entry.placement.crop),
+        pageNumber,
+        row: visiblePlacement.row,
+        col: visiblePlacement.col,
+        rowSpan: visiblePlacement.rowSpan,
+        colSpan: visiblePlacement.colSpan,
+        widthMm: visibleDimensions.width,
+        heightMm: visibleDimensions.height,
+        fullWidthMm: fullDimensions.width,
+        fullHeightMm: fullDimensions.height,
+        sourceOffsetX,
+        sourceOffsetY,
+        labelBase: `P${pageNumber} R${visiblePlacement.row + 1} C${visiblePlacement.col + 1} ${visiblePlacement.colSpan}x${visiblePlacement.rowSpan}${segmentText}`,
+      });
+    });
+  });
+
+  return cutouts;
+}
+
+async function packPdfCutouts(cutouts) {
+  const printableWidth = PDF_PAGE_WIDTH_MM - PDF_MARGIN_MM * 2;
+  const printableHeight = PDF_PAGE_HEIGHT_MM - PDF_MARGIN_MM * 2;
+  const maxTileHeight = printableHeight - PDF_LABEL_GAP_MM - PDF_LABEL_HEIGHT_MM;
+  const imageCache = new Map();
+  const pages = [{ items: [] }];
+  let currentPage = pages[0];
+  let cursorX = PDF_MARGIN_MM;
+  let cursorY = PDF_MARGIN_MM;
+  let rowHeight = 0;
+
+  for (const cutout of cutouts) {
+    const tiles = splitPdfCutout(cutout, printableWidth, maxTileHeight);
+    for (const [tileIndex, tile] of tiles.entries()) {
+      const label = tiles.length > 1 ? `${cutout.labelBase} tile ${tileIndex + 1}/${tiles.length}` : cutout.labelBase;
+      const itemWidth = tile.widthMm;
+      const itemHeight = tile.heightMm + PDF_LABEL_GAP_MM + PDF_LABEL_HEIGHT_MM;
+
+      if (cursorX > PDF_MARGIN_MM && cursorX + itemWidth > PDF_PAGE_WIDTH_MM - PDF_MARGIN_MM) {
+        cursorX = PDF_MARGIN_MM;
+        cursorY += rowHeight + PDF_CUTOUT_SPACING_MM;
+        rowHeight = 0;
+      }
+
+      if (cursorY > PDF_MARGIN_MM && cursorY + itemHeight > PDF_PAGE_HEIGHT_MM - PDF_MARGIN_MM) {
+        currentPage = { items: [] };
+        pages.push(currentPage);
+        cursorX = PDF_MARGIN_MM;
+        cursorY = PDF_MARGIN_MM;
+        rowHeight = 0;
+      }
+
+      currentPage.items.push({
+        xMm: cursorX,
+        yMm: cursorY,
+        widthMm: tile.widthMm,
+        heightMm: tile.heightMm,
+        label: truncatePdfLabel(label, tile.widthMm),
+        image: await renderPdfCutoutTile(cutout, tile, imageCache),
+      });
+
+      cursorX += itemWidth + PDF_CUTOUT_SPACING_MM;
+      rowHeight = Math.max(rowHeight, itemHeight);
+    }
+  }
+
+  return pages.filter((page) => page.items.length);
+}
+
+function splitPdfCutout(cutout, maxWidthMm, maxHeightMm) {
+  const tiles = [];
+  for (let offsetY = 0; offsetY < cutout.heightMm - 0.001; offsetY += maxHeightMm) {
+    const heightMm = Math.min(maxHeightMm, cutout.heightMm - offsetY);
+    for (let offsetX = 0; offsetX < cutout.widthMm - 0.001; offsetX += maxWidthMm) {
+      const widthMm = Math.min(maxWidthMm, cutout.widthMm - offsetX);
+      tiles.push({ offsetX, offsetY, widthMm, heightMm });
+    }
+  }
+  return tiles;
+}
+
+async function renderPdfCutoutTile(cutout, tile, imageCache) {
+  if (!imageCache.has(cutout.image.id)) {
+    imageCache.set(cutout.image.id, await loadCanvasImage(cutout.image.dataUrl));
+  }
+
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(1, Math.round(tile.widthMm * PDF_IMAGE_PX_PER_MM));
+  canvas.height = Math.max(1, Math.round(tile.heightMm * PDF_IMAGE_PX_PER_MM));
+  const ctx = canvas.getContext("2d");
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  const pxPerMmX = canvas.width / tile.widthMm;
+  const pxPerMmY = canvas.height / tile.heightMm;
+  drawPdfCutoutImage(ctx, imageCache.get(cutout.image.id), cutout.crop, {
+    x: -(cutout.sourceOffsetX + tile.offsetX) * pxPerMmX,
+    y: -(cutout.sourceOffsetY + tile.offsetY) * pxPerMmY,
+    width: cutout.fullWidthMm * pxPerMmX,
+    height: cutout.fullHeightMm * pxPerMmY,
+  }, {
+    x: 0,
+    y: 0,
+    width: canvas.width,
+    height: canvas.height,
+  });
+
+  const dataUrl = canvas.toDataURL("image/jpeg", 0.92);
+  return {
+    bytes: dataUrlToBytes(dataUrl),
+    pixelWidth: canvas.width,
+    pixelHeight: canvas.height,
+  };
+}
+
+function drawPdfCutoutImage(ctx, image, crop, fullBounds, visibleBounds) {
+  const safeCrop = normalizeCrop(crop);
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(visibleBounds.x, visibleBounds.y, visibleBounds.width, visibleBounds.height);
+  ctx.clip();
+
+  const imageRatio = image.naturalWidth / image.naturalHeight;
+  const targetRatio = fullBounds.width / fullBounds.height;
+  let drawWidth = fullBounds.width;
+  let drawHeight = fullBounds.height;
+  if (imageRatio > targetRatio) {
+    drawHeight = fullBounds.height;
+    drawWidth = fullBounds.height * imageRatio;
+  } else {
+    drawWidth = fullBounds.width;
+    drawHeight = fullBounds.width / imageRatio;
+  }
+
+  ctx.translate(
+    fullBounds.x + fullBounds.width / 2 + (safeCrop.x / 100) * drawWidth,
+    fullBounds.y + fullBounds.height / 2 + (safeCrop.y / 100) * drawHeight,
+  );
+  ctx.rotate((safeCrop.rotate * Math.PI) / 180);
+  ctx.scale(safeCrop.scale, safeCrop.scale);
+  ctx.drawImage(image, -drawWidth / 2, -drawHeight / 2, drawWidth, drawHeight);
+  ctx.restore();
+}
+
+function buildCutSheetPdf(pages) {
+  const builder = createPdfBuilder();
+  const catalogId = builder.reserveObject();
+  const pagesId = builder.reserveObject();
+  const pageIds = [];
+  const pageWidthPt = mmToPdfPoint(PDF_PAGE_WIDTH_MM);
+  const pageHeightPt = mmToPdfPoint(PDF_PAGE_HEIGHT_MM);
+
+  pages.forEach((page) => {
+    const imageRefs = [];
+    let content = "0.35 w\n0 0 0 RG\n0 0 0 rg\n";
+
+    page.items.forEach((item, index) => {
+      const imageName = `Im${index + 1}`;
+      const imageId = builder.addStream(
+        `<< /Type /XObject /Subtype /Image /Width ${item.image.pixelWidth} /Height ${item.image.pixelHeight} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode`,
+        item.image.bytes,
+      );
+      imageRefs.push({ name: imageName, id: imageId });
+
+      const x = mmToPdfPoint(item.xMm);
+      const y = pageHeightPt - mmToPdfPoint(item.yMm + item.heightMm);
+      const width = mmToPdfPoint(item.widthMm);
+      const height = mmToPdfPoint(item.heightMm);
+      content += `q\n${pdfNumber(width)} 0 0 ${pdfNumber(height)} ${pdfNumber(x)} ${pdfNumber(y)} cm\n/${imageName} Do\nQ\n`;
+      content += `${pdfNumber(x)} ${pdfNumber(y)} ${pdfNumber(width)} ${pdfNumber(height)} re S\n`;
+
+      const labelY = pageHeightPt - mmToPdfPoint(item.yMm + item.heightMm + PDF_LABEL_GAP_MM + 3.2);
+      content += `BT\n/F1 7 Tf\n${pdfNumber(x)} ${pdfNumber(labelY)} Td\n(${escapePdfText(item.label)}) Tj\nET\n`;
+    });
+
+    const contentId = builder.addStream("<<", asciiToBytes(content));
+    const xObjects = imageRefs.map((ref) => `/${ref.name} ${ref.id} 0 R`).join(" ");
+    const pageId = builder.addObject(
+      `<< /Type /Page /Parent ${pagesId} 0 R /MediaBox [0 0 ${pdfNumber(pageWidthPt)} ${pdfNumber(pageHeightPt)}] /Resources << /XObject << ${xObjects} >> /Font << /F1 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> >> >> /Contents ${contentId} 0 R >>`,
+    );
+    pageIds.push(pageId);
+  });
+
+  builder.setObject(
+    pagesId,
+    `<< /Type /Pages /Kids [${pageIds.map((id) => `${id} 0 R`).join(" ")}] /Count ${pageIds.length} >>`,
+  );
+  builder.setObject(catalogId, `<< /Type /Catalog /Pages ${pagesId} 0 R >>`);
+  return builder.toBlob();
+}
+
+function createPdfBuilder() {
+  const objects = [];
+
+  function reserveObject() {
+    objects.push(null);
+    return objects.length;
+  }
+
+  function setObject(id, content) {
+    objects[id - 1] = content instanceof Uint8Array ? content : asciiToBytes(content);
+  }
+
+  function addObject(content) {
+    const id = reserveObject();
+    setObject(id, content);
+    return id;
+  }
+
+  function addStream(dictionaryStart, streamBytes) {
+    const dictionary = `${dictionaryStart} /Length ${streamBytes.length} >>\nstream\n`;
+    return addObject(concatBytes([asciiToBytes(dictionary), streamBytes, asciiToBytes("\nendstream")]));
+  }
+
+  function toBlob() {
+    const chunks = [asciiToBytes("%PDF-1.4\n%\xE2\xE3\xCF\xD3\n")];
+    const offsets = [0];
+    let length = chunks[0].length;
+
+    objects.forEach((object, index) => {
+      if (!object) {
+        throw new Error(`Missing PDF object ${index + 1}`);
+      }
+      offsets.push(length);
+      const header = asciiToBytes(`${index + 1} 0 obj\n`);
+      const footer = asciiToBytes("\nendobj\n");
+      chunks.push(header, object, footer);
+      length += header.length + object.length + footer.length;
+    });
+
+    const xrefOffset = length;
+    let xref = `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
+    for (let index = 1; index < offsets.length; index += 1) {
+      xref += `${String(offsets[index]).padStart(10, "0")} 00000 n \n`;
+    }
+    xref += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xrefOffset}\n%%EOF\n`;
+    chunks.push(asciiToBytes(xref));
+    return new Blob(chunks, { type: "application/pdf" });
+  }
+
+  return { reserveObject, setObject, addObject, addStream, toBlob };
+}
+
+function truncatePdfLabel(label, widthMm) {
+  const maxChars = Math.max(12, Math.floor(widthMm / 1.9));
+  return label.length > maxChars ? `${label.slice(0, Math.max(0, maxChars - 3))}...` : label;
+}
+
+function mmToPdfPoint(value) {
+  return value * PDF_POINTS_PER_MM;
+}
+
+function pdfNumber(value) {
+  return Number(value).toFixed(3).replace(/\.?0+$/, "");
+}
+
+function escapePdfText(value) {
+  return String(value)
+    .replace(/[^\x20-\x7e]/g, "?")
+    .replace(/\\/g, "\\\\")
+    .replace(/\(/g, "\\(")
+    .replace(/\)/g, "\\)")
+    .replace(/[\r\n\t]/g, " ");
+}
+
+function asciiToBytes(value) {
+  const bytes = new Uint8Array(value.length);
+  for (let index = 0; index < value.length; index += 1) {
+    bytes[index] = value.charCodeAt(index) & 0xff;
+  }
+  return bytes;
+}
+
+function dataUrlToBytes(dataUrl) {
+  const base64 = dataUrl.split(",")[1] || "";
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  return bytes;
+}
+
+function concatBytes(chunks) {
+  const totalLength = chunks.reduce((total, chunk) => total + chunk.length, 0);
+  const output = new Uint8Array(totalLength);
+  let offset = 0;
+  chunks.forEach((chunk) => {
+    output.set(chunk, offset);
+    offset += chunk.length;
+  });
+  return output;
+}
+
+function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  anchor.click();
+  window.setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 
 function getSpreadExportName(pages) {
