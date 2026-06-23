@@ -10,7 +10,6 @@ const BINDER_ZOOM_MIN = 0.05;
 const BINDER_ZOOM_MAX = 2;
 const SIDEBAR_WIDTH_MIN = 240;
 const SIDEBAR_WIDTH_MAX = 560;
-const HAS_LOCAL_STORAGE_PROJECT = Boolean(localStorage.getItem(STORAGE_KEY));
 
 const SPAN_PRESETS = {
   "1x1": { colSpan: 1, rowSpan: 1 },
@@ -38,9 +37,13 @@ const state = {
   setupInitialized: false,
   cardSearchResults: [],
   cardSearchLoading: false,
+  cardInsertSearchResults: [],
+  cardInsertSearchLoading: false,
   imageImportItems: [],
   imageImportIndex: 0,
   pendingCardSlot: null,
+  placementClipboard: null,
+  hoveredSlot: null,
   binderZoom: 1,
   fitToDisplay: true,
   centerBinder: true,
@@ -82,7 +85,11 @@ const els = {
   cardLibrary: document.querySelector("#cardLibrary"),
   cardInsertPrompt: document.querySelector("#cardInsertPrompt"),
   cardInsertSlotText: document.querySelector("#cardInsertSlotText"),
-  cardInsertList: document.querySelector("#cardInsertList"),
+  cardInsertSearchForm: document.querySelector("#cardInsertSearchForm"),
+  cardInsertSearchInput: document.querySelector("#cardInsertSearchInput"),
+  cardInsertSearchButton: document.querySelector("#cardInsertSearchButton"),
+  cardInsertSearchStatus: document.querySelector("#cardInsertSearchStatus"),
+  cardInsertSearchResults: document.querySelector("#cardInsertSearchResults"),
   cardInsertCancelButton: document.querySelector("#cardInsertCancelButton"),
   projectMenuButton: document.querySelector("#projectMenuButton"),
   projectMenuModal: document.querySelector("#projectMenuModal"),
@@ -417,9 +424,13 @@ function resetTransientProjectState() {
   state.setupInitialized = false;
   state.cardSearchResults = [];
   state.cardSearchLoading = false;
+  state.cardInsertSearchResults = [];
+  state.cardInsertSearchLoading = false;
   state.imageImportItems = [];
   state.imageImportIndex = 0;
   state.pendingCardSlot = null;
+  state.placementClipboard = null;
+  state.hoveredSlot = null;
   state.binderZoom = 1;
   state.fitToDisplay = true;
   state.centerBinder = true;
@@ -486,15 +497,19 @@ function getSelectedPlacement() {
 }
 
 function saveProject(message = "Saved") {
+  saveProjectToLocalStorageBestEffort();
+  setStatus(message);
+  queueIndexedDbAutoSave();
+}
+
+function saveProjectToLocalStorageBestEffort() {
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state.project));
     localStorage.setItem(CURRENT_PAGE_KEY, state.currentPageId);
-    setStatus(message);
-    queueIndexedDbAutoSave();
   } catch (error) {
-    console.warn("Could not save project.", error);
-    setStatus("Local save failed. Export JSON to keep a copy.");
-    queueIndexedDbAutoSave();
+    console.warn("Could not save project to localStorage.", error);
+    localStorage.removeItem(STORAGE_KEY);
+    localStorage.setItem(CURRENT_PAGE_KEY, state.currentPageId);
   }
 }
 
@@ -571,10 +586,6 @@ async function saveProjectToIndexedDb(message = "Saved local", { quiet = false }
 }
 
 function queueIndexedDbAutoSave() {
-  if (!state.project.localAutoSave) {
-    return;
-  }
-
   if (state.indexedDbAutoSaveTimer) {
     window.clearTimeout(state.indexedDbAutoSaveTimer);
   }
@@ -603,19 +614,13 @@ async function hydrateProjectFromIndexedDbIfNeeded() {
       return;
     }
 
-    state.indexedDbSavedAt = record.savedAt || null;
-    if (HAS_LOCAL_STORAGE_PROJECT) {
-      renderProjectControls();
-      return;
-    }
-
     state.project = normalizeProject(record.project);
     state.currentPageId = state.project.pages[0]?.id || null;
     state.selectedImageId = state.project.images[0]?.id || null;
     state.selectedCardId = state.project.cards[0]?.id || null;
     state.selectedPlacementId = null;
     state.indexedDbSavedAt = record.savedAt || null;
-    saveProject("Loaded local project");
+    setStatus("Loaded local project");
     renderAll();
   } catch (error) {
     console.warn("Could not load IndexedDB project.", error);
@@ -738,6 +743,17 @@ function bindEvents() {
     }
   });
 
+  els.cardInsertSearchForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    await searchCardInsertTcgdexCards();
+  });
+
+  els.cardInsertSearchInput.addEventListener("input", () => {
+    if (!els.cardInsertSearchInput.value.trim()) {
+      clearCardInsertSearch();
+    }
+  });
+
   els.cardInsertCancelButton.addEventListener("click", () => {
     closeCardInsertPrompt();
   });
@@ -842,6 +858,31 @@ function bindEvents() {
 
   document.addEventListener("keydown", (event) => {
     const editingText = ["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement?.tagName);
+    const shortcut = event.ctrlKey || event.metaKey;
+    const key = event.key.toLowerCase();
+    if (shortcut && !editingText && key === "c") {
+      event.preventDefault();
+      copySelectedPlacement("copy");
+      return;
+    }
+
+    if (shortcut && !editingText && key === "x") {
+      event.preventDefault();
+      copySelectedPlacement("cut");
+      return;
+    }
+
+    if (shortcut && !editingText && key === "v") {
+      event.preventDefault();
+      const targetSlot = state.hoveredSlot || state.pendingCardSlot;
+      if (targetSlot) {
+        pastePlacementClipboard(targetSlot.pageId, targetSlot.row, targetSlot.col);
+      } else {
+        setStatus("Hover a target slot before pasting");
+      }
+      return;
+    }
+
     if (event.key === "Escape" && !els.projectMenuModal.hidden) {
       closeProjectMenuModal();
       return;
@@ -1347,29 +1388,7 @@ async function searchTcgdexCards() {
   renderCardSearchControls();
 
   try {
-    const query = buildTcgdexCardNameQuery(searchTerm);
-    if (!query.name) {
-      els.cardSearchStatus.textContent = "Enter a card name";
-      return;
-    }
-
-    const params = new URLSearchParams({
-      name: query.name,
-      "pagination:page": "1",
-      "pagination:itemsPerPage": "24",
-      "sort:field": "name",
-      "sort:order": "ASC",
-    });
-
-    const response = await fetch(`${TCGDEX_CARDS_ENDPOINT}?${params.toString()}`);
-    if (!response.ok) {
-      throw new Error(`Card search failed with status ${response.status}`);
-    }
-
-    const result = await response.json();
-    state.cardSearchResults = Array.isArray(result)
-      ? result.filter((card) => card.image)
-      : [];
+    state.cardSearchResults = await fetchTcgdexCardSearchResults(searchTerm);
     els.cardSearchStatus.textContent = state.cardSearchResults.length
       ? `${state.cardSearchResults.length} result${state.cardSearchResults.length === 1 ? "" : "s"}`
       : "No matching cards";
@@ -1380,6 +1399,29 @@ async function searchTcgdexCards() {
     state.cardSearchLoading = false;
     renderCardSearchControls();
   }
+}
+
+async function fetchTcgdexCardSearchResults(searchTerm) {
+  const query = buildTcgdexCardNameQuery(searchTerm);
+  if (!query.name) {
+    return [];
+  }
+
+  const params = new URLSearchParams({
+    name: query.name,
+    "pagination:page": "1",
+    "pagination:itemsPerPage": "24",
+    "sort:field": "name",
+    "sort:order": "ASC",
+  });
+
+  const response = await fetch(`${TCGDEX_CARDS_ENDPOINT}?${params.toString()}`);
+  if (!response.ok) {
+    throw new Error(`Card search failed with status ${response.status}`);
+  }
+
+  const result = await response.json();
+  return Array.isArray(result) ? result.filter((card) => card.image) : [];
 }
 
 function buildTcgdexCardNameQuery(searchTerm) {
@@ -1395,23 +1437,58 @@ function clearCardSearch() {
   renderCardSearchControls();
 }
 
-async function importTcgdexCardArt(card) {
+async function searchCardInsertTcgdexCards() {
+  const searchTerm = els.cardInsertSearchInput.value.trim();
+  if (!searchTerm) {
+    clearCardInsertSearch();
+    return;
+  }
+
+  state.cardInsertSearchLoading = true;
+  state.cardInsertSearchResults = [];
+  els.cardInsertSearchStatus.textContent = "Searching cards";
+  renderCardInsertPrompt();
+
+  try {
+    state.cardInsertSearchResults = await fetchTcgdexCardSearchResults(searchTerm);
+    els.cardInsertSearchStatus.textContent = state.cardInsertSearchResults.length
+      ? `${state.cardInsertSearchResults.length} result${state.cardInsertSearchResults.length === 1 ? "" : "s"}`
+      : "No matching cards";
+  } catch (error) {
+    console.warn("TCGdex insert card search failed.", error);
+    els.cardInsertSearchStatus.textContent = "Card search failed";
+  } finally {
+    state.cardInsertSearchLoading = false;
+    renderCardInsertPrompt();
+  }
+}
+
+function clearCardInsertSearch() {
+  state.cardInsertSearchLoading = false;
+  state.cardInsertSearchResults = [];
+  els.cardInsertSearchStatus.textContent = "";
+  renderCardInsertPrompt();
+}
+
+async function importTcgdexCardArt(card, { statusElement = els.cardSearchStatus, renderAfterImport = true } = {}) {
   const existing = state.project.cards.find(
     (cardAsset) => cardAsset.source === "tcgdex" && cardAsset.cardId === card.id,
   );
   if (existing) {
     state.selectedCardId = existing.id;
     setStatus(`Selected ${existing.name}`);
-    renderAll();
-    return;
+    if (renderAfterImport) {
+      renderAll();
+    }
+    return existing;
   }
 
   if (!card.image) {
     setStatus("This card has no image");
-    return;
+    return null;
   }
 
-  els.cardSearchStatus.textContent = `Importing ${card.name}`;
+  statusElement.textContent = `Importing ${card.name}`;
   try {
     const cardDetail = await fetchTcgdexCardDetail(card.id);
     const cardForImport = cardDetail || card;
@@ -1431,10 +1508,14 @@ async function importTcgdexCardArt(card) {
     state.project.cards.push(cardAsset);
     state.selectedCardId = cardAsset.id;
     saveProject(`Imported ${card.name}`);
-    renderAll();
+    if (renderAfterImport) {
+      renderAll();
+    }
+    return cardAsset;
   } catch (error) {
     console.warn("TCGdex image import failed.", error);
-    els.cardSearchStatus.textContent = "Could not import card art";
+    statusElement.textContent = "Could not import card art";
+    return null;
   }
 }
 
@@ -1599,7 +1680,8 @@ function renameImageAsset(imageId) {
 function renderCardInsertPrompt() {
   const pendingSlot = state.pendingCardSlot;
   els.cardInsertPrompt.hidden = !pendingSlot;
-  els.cardInsertList.replaceChildren();
+  els.cardInsertSearchResults.replaceChildren();
+  els.cardInsertSearchButton.disabled = state.cardInsertSearchLoading;
   if (!pendingSlot) {
     return;
   }
@@ -1608,41 +1690,37 @@ function renderCardInsertPrompt() {
   const pageNumber = page ? getPageNumber(page) : 1;
   els.cardInsertSlotText.textContent = `Page ${pageNumber}, row ${pendingSlot.row + 1}, column ${pendingSlot.col + 1}`;
 
-  if (!state.project.cards.length) {
+  if (!state.cardInsertSearchResults.length && !state.cardInsertSearchLoading) {
     const empty = document.createElement("div");
     empty.className = "empty-state";
-    empty.textContent = "No cards imported. Search TCGdex and import a card first.";
-    els.cardInsertList.append(empty);
+    empty.textContent = "Search TCGdex to insert a card here.";
+    els.cardInsertSearchResults.append(empty);
   }
 
-  const selectedImage = state.selectedImageId ? getImage(state.selectedImageId) : null;
-  if (selectedImage && state.project.images.some((image) => image.id === selectedImage.id)) {
-    const imageButton = document.createElement("button");
-    imageButton.type = "button";
-    imageButton.className = "library-item";
-    imageButton.innerHTML = `<img alt=""><span></span>`;
-    imageButton.querySelector("img").src = selectedImage.dataUrl;
-    imageButton.querySelector("img").alt = selectedImage.name;
-    imageButton.querySelector("span").textContent = `Use selected image: ${selectedImage.name}`;
-    imageButton.addEventListener("click", () => {
-      state.pendingCardSlot = null;
-      placeSelectedImage(pendingSlot.pageId, pendingSlot.row, pendingSlot.col);
-    });
-    els.cardInsertList.append(imageButton);
-  }
+  state.cardInsertSearchResults.forEach((card) => {
+    const imageUrl = getTcgdexCardImageUrl(card, "low", "webp");
+    if (!imageUrl) return;
 
-  state.project.cards.forEach((card) => {
-    const item = document.createElement("button");
-    item.type = "button";
-    item.className = "library-item";
-    item.innerHTML = `<img alt=""><span></span>`;
-    item.querySelector("img").src = card.dataUrl;
-    item.querySelector("img").alt = card.name;
-    item.querySelector("span").textContent = card.name;
-    item.addEventListener("click", () => {
-      placeCardInPendingSlot(card.id);
+    const result = document.createElement("button");
+    result.type = "button";
+    result.className = "card-result";
+    result.innerHTML = `<img alt=""><span><strong></strong><span></span><span></span></span>`;
+    result.querySelector("img").src = imageUrl;
+    result.querySelector("img").alt = card.name;
+    result.querySelector("strong").textContent = card.name;
+    const detailLines = result.querySelectorAll("span span");
+    detailLines[0].textContent = card.localId ? `Local #${card.localId}` : "No local number";
+    detailLines[1].textContent = card.id || "";
+    result.addEventListener("click", async () => {
+      const cardAsset = await importTcgdexCardArt(card, {
+        statusElement: els.cardInsertSearchStatus,
+        renderAfterImport: false,
+      });
+      if (cardAsset) {
+        placeCardInPendingSlot(cardAsset.id);
+      }
     });
-    els.cardInsertList.append(item);
+    els.cardInsertSearchResults.append(result);
   });
 }
 
@@ -1652,13 +1730,28 @@ function openCardInsertPrompt(pageId, row, col) {
 
   state.currentPageId = page.id;
   state.selectedPlacementId = null;
+  state.cardInsertSearchResults = [];
+  state.cardInsertSearchLoading = false;
   state.pendingCardSlot = { pageId, row, col };
+  if (document.activeElement !== els.cardInsertSearchInput) {
+    els.cardInsertSearchInput.value = "";
+  }
+  els.cardInsertSearchStatus.textContent = "";
   saveProject("Page selected");
   renderAll();
+  window.setTimeout(() => {
+    if (!els.cardInsertPrompt.hidden) {
+      els.cardInsertSearchInput.focus();
+    }
+  }, 0);
 }
 
 function closeCardInsertPrompt() {
   state.pendingCardSlot = null;
+  state.cardInsertSearchResults = [];
+  state.cardInsertSearchLoading = false;
+  els.cardInsertSearchInput.value = "";
+  els.cardInsertSearchStatus.textContent = "";
   renderAll();
 }
 
@@ -1776,8 +1869,36 @@ function createPagePreview(page, grid) {
       pocket.style.gridRow = `${row + 1} / span 1`;
       pocket.style.gridColumn = `${col + 1} / span 1`;
       pocket.setAttribute("aria-label", `Page ${pageNumber}, slot row ${row + 1}, column ${col + 1}`);
+      pocket.addEventListener("mouseenter", () => {
+        state.hoveredSlot = { pageId: page.id, row, col };
+      });
+      pocket.addEventListener("mouseleave", () => {
+        if (
+          state.hoveredSlot?.pageId === page.id &&
+          state.hoveredSlot.row === row &&
+          state.hoveredSlot.col === col
+        ) {
+          state.hoveredSlot = null;
+        }
+      });
+      pocket.addEventListener("focus", () => {
+        state.hoveredSlot = { pageId: page.id, row, col };
+      });
+      pocket.addEventListener("blur", () => {
+        if (
+          state.hoveredSlot?.pageId === page.id &&
+          state.hoveredSlot.row === row &&
+          state.hoveredSlot.col === col
+        ) {
+          state.hoveredSlot = null;
+        }
+      });
       pocket.addEventListener("click", (event) => {
         event.stopPropagation();
+        if (state.placementClipboard) {
+          pastePlacementClipboard(page.id, row, col);
+          return;
+        }
         openCardInsertPrompt(page.id, row, col);
       });
       binderGrid.append(pocket);
@@ -1947,6 +2068,92 @@ function placementsOverlap(a, b) {
     a.row < b.row + b.rowSpan &&
     a.row + a.rowSpan > b.row
   );
+}
+
+function copySelectedPlacement(mode = "copy") {
+  const page = getCurrentPage();
+  const placement = getSelectedPlacement();
+  const asset = placement ? getImage(placement.imageId) : null;
+  if (!page || !placement || !asset) {
+    setStatus("Select a placed card first");
+    return false;
+  }
+
+  state.placementClipboard = {
+    mode,
+    sourcePageId: page.id,
+    sourcePlacementId: placement.id,
+    assetName: asset.name,
+    placement: {
+      imageId: placement.imageId,
+      rowSpan: placement.rowSpan,
+      colSpan: placement.colSpan,
+      crop: normalizeCrop(placement.crop),
+    },
+  };
+  setStatus(`${mode === "cut" ? "Cut" : "Copied"} ${asset.name}. Click a target slot to paste.`);
+  renderCardInsertPrompt();
+  return true;
+}
+
+function pastePlacementClipboard(pageId, row, col) {
+  const clipboard = state.placementClipboard;
+  const page = state.project.pages.find((candidate) => candidate.id === pageId);
+  const asset = clipboard ? getImage(clipboard.placement.imageId) : null;
+  if (!clipboard || !page || !asset) {
+    setStatus("Nothing to paste");
+    return false;
+  }
+
+  const grid = getProjectGrid();
+  const nextPlacement = {
+    id: createId(),
+    imageId: clipboard.placement.imageId,
+    row,
+    col,
+    rowSpan: clipboard.placement.rowSpan,
+    colSpan: clipboard.placement.colSpan,
+    crop: normalizeCrop(clipboard.placement.crop),
+  };
+
+  if (!placementFits(nextPlacement, grid.rows, grid.cols)) {
+    setStatus("Pasted item exceeds grid bounds");
+    return false;
+  }
+
+  const overlapping = page.placements.filter((placement) => {
+    const isCutSource =
+      clipboard.mode === "cut" &&
+      clipboard.sourcePageId === page.id &&
+      clipboard.sourcePlacementId === placement.id;
+    return !isCutSource && placementsOverlap(placement, nextPlacement);
+  });
+
+  if (
+    overlapping.length &&
+    !window.confirm(`Replace ${overlapping.length} overlapping placement${overlapping.length > 1 ? "s" : ""}?`)
+  ) {
+    return false;
+  }
+
+  if (clipboard.mode === "cut") {
+    const sourcePage = state.project.pages.find((candidate) => candidate.id === clipboard.sourcePageId);
+    if (sourcePage) {
+      sourcePage.placements = sourcePage.placements.filter(
+        (placement) => placement.id !== clipboard.sourcePlacementId,
+      );
+    }
+  }
+
+  page.placements = page.placements.filter((placement) => !placementsOverlap(placement, nextPlacement));
+  page.placements.push(nextPlacement);
+  state.currentPageId = page.id;
+  state.selectedPlacementId = nextPlacement.id;
+  state.pendingCardSlot = null;
+  state.placementClipboard = null;
+  saveProject(`${clipboard.mode === "cut" ? "Moved" : "Pasted"} ${asset.name}`);
+  renderAll();
+  return true;
 }
 
 function updateSelectedCrop(key, value) {

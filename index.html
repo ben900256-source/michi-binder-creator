@@ -54,7 +54,12 @@
       <div class="setup-card insert-card">
         <h1>Insert Card</h1>
         <p id="cardInsertSlotText" class="status"></p>
-        <div id="cardInsertList" class="card-insert-list"></div>
+        <form id="cardInsertSearchForm" class="search-row">
+          <input id="cardInsertSearchInput" type="search" autocomplete="off" placeholder="Search TCGdex cards" />
+          <button id="cardInsertSearchButton" type="submit">Search</button>
+        </form>
+        <p id="cardInsertSearchStatus" class="status" aria-live="polite"></p>
+        <div id="cardInsertSearchResults" class="card-results"></div>
         <button id="cardInsertCancelButton" type="button" class="wide">Cancel</button>
       </div>
     </div>
@@ -136,7 +141,7 @@
           </form>
           <p id="cardSearchStatus" class="status" aria-live="polite"></p>
           <div id="cardSearchResults" class="card-results"></div>
-          <div id="cardLibrary" class="image-library"></div>
+          <div id="cardLibrary" class="image-library" hidden></div>
         </section>
 
         <section class="panel">
