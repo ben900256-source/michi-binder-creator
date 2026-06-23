@@ -44,6 +44,7 @@ const state = {
   cardSearchLoading: false,
   cardInsertSearchResults: [],
   cardInsertSearchLoading: false,
+  imageSearchQuery: "",
   imageImportItems: [],
   imageImportIndex: 0,
   pendingCardSlot: null,
@@ -86,7 +87,13 @@ const els = {
   imageImportForm: document.querySelector("#imageImportForm"),
   imageImportCount: document.querySelector("#imageImportCount"),
   imageImportPreview: document.querySelector("#imageImportPreview"),
+  imageImportPreviewImage: document.querySelector("#imageImportPreviewImage"),
   imageImportNameInput: document.querySelector("#imageImportNameInput"),
+  imageImportScaleInput: document.querySelector("#imageImportScaleInput"),
+  imageImportXInput: document.querySelector("#imageImportXInput"),
+  imageImportYInput: document.querySelector("#imageImportYInput"),
+  imageImportRotateInput: document.querySelector("#imageImportRotateInput"),
+  imageImportResetCropButton: document.querySelector("#imageImportResetCropButton"),
   imageImportSaveButton: document.querySelector("#imageImportSaveButton"),
   imageImportSkipButton: document.querySelector("#imageImportSkipButton"),
   imageImportCancelButton: document.querySelector("#imageImportCancelButton"),
@@ -154,6 +161,7 @@ const els = {
   placementColsInput: document.querySelector("#placementColsInput"),
   placementRowsInput: document.querySelector("#placementRowsInput"),
   imageFileInput: document.querySelector("#imageFileInput"),
+  imageSearchInput: document.querySelector("#imageSearchInput"),
   dropZone: document.querySelector("#dropZone"),
   imageLibrary: document.querySelector("#imageLibrary"),
   appShell: document.querySelector(".app-shell"),
@@ -296,6 +304,7 @@ function normalizeCardAsset(card) {
   return {
     ...normalizeAsset(card),
     source: "tcgdex",
+    owned: card.owned !== false,
   };
 }
 
@@ -499,6 +508,7 @@ function resetTransientProjectState() {
   state.cardSearchLoading = false;
   state.cardInsertSearchResults = [];
   state.cardInsertSearchLoading = false;
+  state.imageSearchQuery = "";
   state.imageImportItems = [];
   state.imageImportIndex = 0;
   state.pendingCardSlot = null;
@@ -1026,9 +1036,25 @@ function bindEvents() {
     }
   });
 
-  els.imageImportForm.addEventListener("submit", (event) => {
+  els.imageImportScaleInput.addEventListener("input", () => {
+    updateImageImportCrop("scale", els.imageImportScaleInput.value);
+  });
+  els.imageImportXInput.addEventListener("input", () => {
+    updateImageImportCrop("x", els.imageImportXInput.value);
+  });
+  els.imageImportYInput.addEventListener("input", () => {
+    updateImageImportCrop("y", els.imageImportYInput.value);
+  });
+  els.imageImportRotateInput.addEventListener("change", () => {
+    updateImageImportCrop("rotate", els.imageImportRotateInput.value);
+  });
+  els.imageImportResetCropButton.addEventListener("click", () => {
+    setCurrentImageImportCrop(DEFAULT_CROP);
+  });
+
+  els.imageImportForm.addEventListener("submit", async (event) => {
     event.preventDefault();
-    importCurrentWizardImage();
+    await importCurrentWizardImage();
   });
 
   els.imageImportSkipButton.addEventListener("click", () => {
@@ -1159,6 +1185,11 @@ function bindEvents() {
   els.imageFileInput.addEventListener("change", async () => {
     await importImageFiles(Array.from(els.imageFileInput.files || []));
     els.imageFileInput.value = "";
+  });
+
+  els.imageSearchInput.addEventListener("input", () => {
+    state.imageSearchQuery = els.imageSearchInput.value.trim().toLowerCase();
+    renderImageLibrary();
   });
 
   els.dropZone.addEventListener("dragover", (event) => {
@@ -1938,6 +1969,7 @@ async function importTcgdexCardArt(card, { statusElement = els.cardSearchStatus,
       setName: cardForImport.set?.name,
       number: cardForImport.localId,
       rarity: cardForImport.rarity,
+      owned: true,
     };
     state.project.cards.push(cardAsset);
     state.selectedCardId = cardAsset.id;
@@ -2021,15 +2053,34 @@ function renderCardLibrary() {
 
   state.project.cards.forEach((card) => {
     const item = document.createElement("div");
-    item.className = `library-item${card.id === state.selectedCardId ? " selected" : ""}`;
+    item.className = [
+      "library-item",
+      "card-library-item",
+      card.id === state.selectedCardId ? "selected" : "",
+      isCardOwned(card) ? "" : "not-owned",
+    ]
+      .filter(Boolean)
+      .join(" ");
     item.draggable = true;
     item.tabIndex = 0;
     item.setAttribute("role", "button");
     item.setAttribute("aria-label", `Copy ${card.name} to placement clipboard`);
-    item.innerHTML = `<img alt=""><span></span>`;
+    item.innerHTML = `<img alt=""><span></span><label class="card-owned-control"><input type="checkbox"><span>Have</span></label>`;
     item.querySelector("img").src = card.dataUrl;
     item.querySelector("img").alt = card.name;
     item.querySelector("span").textContent = card.name;
+    item.querySelector(".card-owned-control").addEventListener("click", (event) => {
+      event.stopPropagation();
+    });
+    const ownedInput = item.querySelector(".card-owned-control input");
+    ownedInput.checked = isCardOwned(card);
+    ownedInput.addEventListener("click", (event) => {
+      event.stopPropagation();
+    });
+    ownedInput.addEventListener("change", (event) => {
+      event.stopPropagation();
+      setCardOwned(card.id, ownedInput.checked);
+    });
     item.addEventListener("click", () => {
       setCardPlacementClipboard(card);
       renderCardLibrary();
@@ -2056,8 +2107,20 @@ function renderCardLibrary() {
   });
 }
 
+function setCardOwned(cardId, owned) {
+  const card = getCard(cardId);
+  if (!card) return;
+
+  card.owned = owned;
+  saveProject(`${card.name} marked ${owned ? "owned" : "needed"}`);
+  renderAll();
+}
+
 function renderImageLibrary() {
   els.imageLibrary.replaceChildren();
+  if (document.activeElement !== els.imageSearchInput) {
+    els.imageSearchInput.value = state.imageSearchQuery;
+  }
 
   if (!state.project.images.length) {
     const empty = document.createElement("div");
@@ -2067,7 +2130,20 @@ function renderImageLibrary() {
     return;
   }
 
-  state.project.images.forEach((image) => {
+  const query = state.imageSearchQuery.trim().toLowerCase();
+  const images = query
+    ? state.project.images.filter((image) => image.name.toLowerCase().includes(query))
+    : state.project.images;
+
+  if (!images.length) {
+    const empty = document.createElement("div");
+    empty.className = "empty-state";
+    empty.textContent = "No matching images";
+    els.imageLibrary.append(empty);
+    return;
+  }
+
+  images.forEach((image) => {
     const item = document.createElement("div");
     item.className = `library-item${image.id === state.selectedImageId ? " selected" : ""}`;
     item.tabIndex = 0;
@@ -2748,6 +2824,8 @@ function createPagePreview(page, grid) {
       "placement",
       segment ? "placement-segment" : "",
       segmentCount > 1 ? "segmented" : "",
+      entry.isCard ? "card-placement" : "",
+      entry.isCard && !isCardOwned(image) ? "not-owned-card" : "",
       showPlacementControls ? "" : "placement-controls-hidden",
       placement.id === state.selectedPlacementId ? "selected" : "",
     ]
@@ -2775,6 +2853,14 @@ function createPagePreview(page, grid) {
     item.append(trash);
 
     const placementIsCard = isCardPlacement(placement);
+    if (placementIsCard) {
+      const ownedToggle = document.createElement("span");
+      ownedToggle.className = "placement-owned-toggle";
+      ownedToggle.textContent = isCardOwned(image) ? "Have" : "Need";
+      ownedToggle.title = isCardOwned(image) ? "Mark as needed" : "Mark as owned";
+      item.append(ownedToggle);
+    }
+
     if (!placementIsCard) {
       const edit = document.createElement("span");
       edit.className = "placement-edit";
@@ -2859,6 +2945,11 @@ function createPagePreview(page, grid) {
         return;
       }
 
+      if (event.target.closest(".placement-owned-toggle")) {
+        setCardOwned(image.id, !isCardOwned(image));
+        return;
+      }
+
       if (state.pendingImagePlacement) {
         const slot = getSlotFromBinderGridEvent(event, binderGrid, grid);
         if (slot) {
@@ -2897,7 +2988,16 @@ function createPlacementPreviewBlock(placement, grid, layout) {
   if (!image) return null;
 
   const item = document.createElement("div");
-  item.className = `placement clipboard-preview${placementFits(placement, grid.rows, grid.cols) ? "" : " invalid"}`;
+  const isCard = isCardAssetId(placement.imageId);
+  item.className = [
+    "placement",
+    "clipboard-preview",
+    isCard ? "card-placement" : "",
+    isCard && !isCardOwned(image) ? "not-owned-card" : "",
+    placementFits(placement, grid.rows, grid.cols) ? "" : "invalid",
+  ]
+    .filter(Boolean)
+    .join(" ");
   item.style.gridRow = `${placement.row + 1} / span ${placement.rowSpan}`;
   item.style.gridColumn = `${placement.col + 1} / span ${placement.colSpan}`;
 
@@ -3002,6 +3102,11 @@ function placementsOverlap(a, b) {
 
 function isCardAssetId(imageId) {
   return state.project.cards.some((card) => card.id === imageId);
+}
+
+function isCardOwned(cardOrImageId) {
+  const card = typeof cardOrImageId === "string" ? getCard(cardOrImageId) : cardOrImageId;
+  return !card || card.owned !== false;
 }
 
 function isCardPlacement(placement) {
@@ -3340,10 +3445,14 @@ async function importImageFiles(files, fallbackName = "image") {
     try {
       const dataUrl = await readFileAsDataUrl(file);
       const fallbackIndex = state.project.images.length + state.imageImportItems.length + importItems.length + 1;
+      const dimensions = await getDataUrlImageDimensions(dataUrl);
       importItems.push({
         originalName: file.name || `${fallbackName}-${fallbackIndex}.png`,
         name: stripImageExtension(file.name) || titleCaseFallbackName(fallbackName, fallbackIndex),
         dataUrl,
+        width: dimensions?.width || null,
+        height: dimensions?.height || null,
+        crop: { ...DEFAULT_CROP },
       });
     } catch (error) {
       console.warn("Could not import image.", error);
@@ -3371,38 +3480,156 @@ function renderImageImportWizard() {
   const item = getCurrentImageImportItem();
   els.imageImportWizard.hidden = !item;
   if (!item) {
+    els.imageImportPreviewImage.removeAttribute("src");
     return;
   }
 
   els.imageImportCount.textContent = `Image ${state.imageImportIndex + 1} of ${state.imageImportItems.length}`;
-  els.imageImportPreview.src = item.dataUrl;
-  els.imageImportPreview.alt = item.name || item.originalName;
+  setImageImportPreviewSize(item);
+  els.imageImportPreviewImage.src = item.dataUrl;
+  els.imageImportPreviewImage.alt = item.name || item.originalName;
   if (document.activeElement !== els.imageImportNameInput) {
     els.imageImportNameInput.value = item.name;
   }
+  syncImageImportCropControls();
+  applyImageImportPreviewCrop();
   window.setTimeout(() => {
-    if (!els.imageImportWizard.hidden && document.activeElement !== els.imageImportNameInput) {
+    const activeElement = document.activeElement;
+    const shouldFocus =
+      !els.imageImportWizard.hidden &&
+      (!activeElement || activeElement === document.body || !els.imageImportWizard.contains(activeElement));
+    if (shouldFocus) {
       els.imageImportNameInput.focus();
       els.imageImportNameInput.select();
     }
   }, 0);
 }
 
-function importCurrentWizardImage() {
+function setImageImportPreviewSize(item) {
+  const ratio =
+    Number.isFinite(item?.width / item?.height) && item.width > 0 && item.height > 0 ? item.width / item.height : 0.716;
+  const stageWidth = Math.round(Math.min(680, Math.max(300, window.innerWidth - 96)));
+  const stageHeight = Math.round(Math.min(460, Math.max(240, window.innerHeight * 0.46)));
+  let frameWidth = stageWidth;
+  let frameHeight = frameWidth / ratio;
+  if (frameHeight > stageHeight) {
+    frameHeight = stageHeight;
+    frameWidth = frameHeight * ratio;
+  }
+
+  els.imageImportPreview.style.width = `${Math.round(frameWidth)}px`;
+  els.imageImportPreview.style.height = `${Math.round(frameHeight)}px`;
+}
+
+function updateImageImportCrop(key, value) {
   const item = getCurrentImageImportItem();
   if (!item) return;
 
-  const image = {
-    id: createId(),
-    name: (item.name || "").trim() || stripImageExtension(item.originalName) || "Imported Image",
-    dataUrl: item.dataUrl,
-    source: "upload",
-  };
+  setCurrentImageImportCrop({
+    ...normalizeCrop(item.crop),
+    [key]: key === "rotate" ? Number(value) : Number(value),
+  });
+}
 
-  state.project.images.push(image);
-  state.selectedImageId = image.id;
-  saveProject(`Imported ${image.name}`);
-  advanceImageImportWizard();
+function setCurrentImageImportCrop(crop) {
+  const item = getCurrentImageImportItem();
+  if (!item) return;
+
+  item.crop = normalizeCrop(crop);
+  syncImageImportCropControls();
+  applyImageImportPreviewCrop();
+}
+
+function syncImageImportCropControls() {
+  const crop = normalizeCrop(getCurrentImageImportItem()?.crop);
+  els.imageImportScaleInput.value = crop.scale;
+  els.imageImportXInput.value = crop.x;
+  els.imageImportYInput.value = crop.y;
+  els.imageImportRotateInput.value = crop.rotate;
+}
+
+function applyImageImportPreviewCrop() {
+  const item = getCurrentImageImportItem();
+  if (!item) return;
+
+  els.imageImportPreviewImage.style.transform = cropToTransform(item.crop);
+}
+
+async function importCurrentWizardImage() {
+  const item = getCurrentImageImportItem();
+  if (!item) return;
+
+  els.imageImportSaveButton.disabled = true;
+  els.imageImportSkipButton.disabled = true;
+  try {
+    const dataUrl = await createImportedImageDataUrl(item);
+    const image = {
+      id: createId(),
+      name: (item.name || "").trim() || stripImageExtension(item.originalName) || "Imported Image",
+      dataUrl,
+      source: "upload",
+    };
+
+    state.project.images.push(image);
+    if (item.width && item.height) {
+      state.imageNaturalSizes.set(image.id, { width: item.width, height: item.height });
+    }
+    state.selectedImageId = image.id;
+    saveProject(`Imported ${image.name}`);
+    advanceImageImportWizard();
+  } catch (error) {
+    console.warn("Could not finish image import.", error);
+    setStatus("Image import failed");
+  } finally {
+    els.imageImportSaveButton.disabled = false;
+    els.imageImportSkipButton.disabled = false;
+  }
+}
+
+async function createImportedImageDataUrl(item) {
+  const crop = normalizeCrop(item.crop);
+  if (isDefaultCrop(crop)) {
+    return item.dataUrl;
+  }
+
+  const image = await loadCanvasImage(item.dataUrl);
+  const maxSide = 1800;
+  const outputScale = Math.min(1, maxSide / Math.max(image.naturalWidth, image.naturalHeight));
+  const width = Math.max(1, Math.round(image.naturalWidth * outputScale));
+  const height = Math.max(1, Math.round(image.naturalHeight * outputScale));
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext("2d");
+  ctx.clearRect(0, 0, width, height);
+  ctx.translate(width / 2 + (crop.x / 100) * width, height / 2 + (crop.y / 100) * height);
+  ctx.rotate((crop.rotate * Math.PI) / 180);
+  ctx.scale(crop.scale, crop.scale);
+  ctx.drawImage(image, -width / 2, -height / 2, width, height);
+  return canvas.toDataURL("image/png");
+}
+
+function isDefaultCrop(crop) {
+  const safeCrop = normalizeCrop(crop);
+  return (
+    safeCrop.scale === DEFAULT_CROP.scale &&
+    safeCrop.x === DEFAULT_CROP.x &&
+    safeCrop.y === DEFAULT_CROP.y &&
+    safeCrop.rotate === DEFAULT_CROP.rotate
+  );
+}
+
+async function getDataUrlImageDimensions(dataUrl) {
+  try {
+    const image = await loadCanvasImage(dataUrl);
+    return {
+      width: image.naturalWidth,
+      height: image.naturalHeight,
+    };
+  } catch (error) {
+    console.warn("Could not read image dimensions.", error);
+    return null;
+  }
 }
 
 function advanceImageImportWizard() {
@@ -3509,7 +3736,7 @@ async function exportCurrentPagePng() {
 async function exportCutSheetPdf() {
   const cutouts = getProjectPdfCutouts();
   if (!cutouts.length) {
-    setStatus("No image cutouts to export");
+    setStatus("No image or needed card cutouts to export");
     return;
   }
 
@@ -3536,7 +3763,8 @@ function getProjectPdfCutouts() {
   state.project.pages.forEach((page) => {
     const pageNumber = getPageNumber(page);
     getSegmentedPlacementRenderEntries(page).forEach((entry) => {
-      if (entry.isCard || !isImagePlacement(entry.placement)) return;
+      const isNeededCard = entry.isCard && !isCardOwned(entry.image);
+      if (!isNeededCard && !isImagePlacement(entry.placement)) return;
 
       const visiblePlacement = entry.segment || entry.placement;
       const fullDimensions = getPlacementDimensions(entry.placement.colSpan, entry.placement.rowSpan, layout);
@@ -3544,11 +3772,13 @@ function getProjectPdfCutouts() {
       const sourceOffsetX = entry.segment ? entry.segment.sourceCol * (layout.pocketWidth + layout.gapX) : 0;
       const sourceOffsetY = entry.segment ? entry.segment.sourceRow * (layout.pocketHeight + layout.gapY) : 0;
       const segmentText = entry.segmentCount > 1 ? ` segment ${entry.segmentIndex + 1}/${entry.segmentCount}` : "";
+      const cardText = isNeededCard ? " needed card" : "";
 
       cutouts.push({
         id: `${page.id}-${entry.placement.id}-${entry.segmentIndex}`,
         image: entry.image,
         crop: normalizeCrop(entry.placement.crop),
+        muted: isNeededCard,
         pageNumber,
         row: visiblePlacement.row,
         col: visiblePlacement.col,
@@ -3560,7 +3790,7 @@ function getProjectPdfCutouts() {
         fullHeightMm: fullDimensions.height,
         sourceOffsetX,
         sourceOffsetY,
-        labelBase: `P${pageNumber} R${visiblePlacement.row + 1} C${visiblePlacement.col + 1} ${visiblePlacement.colSpan}x${visiblePlacement.rowSpan}${segmentText}`,
+        labelBase: `P${pageNumber} R${visiblePlacement.row + 1} C${visiblePlacement.col + 1} ${visiblePlacement.colSpan}x${visiblePlacement.rowSpan}${segmentText}${cardText}`,
       });
     });
   });
@@ -3653,7 +3883,7 @@ async function renderPdfCutoutTile(cutout, tile, imageCache) {
     y: 0,
     width: canvas.width,
     height: canvas.height,
-  });
+  }, { muted: cutout.muted });
 
   const dataUrl = canvas.toDataURL("image/jpeg", 0.92);
   return {
@@ -3663,7 +3893,7 @@ async function renderPdfCutoutTile(cutout, tile, imageCache) {
   };
 }
 
-function drawPdfCutoutImage(ctx, image, crop, fullBounds, visibleBounds) {
+function drawPdfCutoutImage(ctx, image, crop, fullBounds, visibleBounds, options = {}) {
   const safeCrop = normalizeCrop(crop);
   ctx.save();
   ctx.beginPath();
@@ -3688,6 +3918,9 @@ function drawPdfCutoutImage(ctx, image, crop, fullBounds, visibleBounds) {
   );
   ctx.rotate((safeCrop.rotate * Math.PI) / 180);
   ctx.scale(safeCrop.scale, safeCrop.scale);
+  if (options.muted) {
+    ctx.filter = "grayscale(1) opacity(0.45)";
+  }
   ctx.drawImage(image, -drawWidth / 2, -drawHeight / 2, drawWidth, drawHeight);
   ctx.restore();
 }
@@ -3997,6 +4230,10 @@ async function drawPageToCanvas(ctx, page, pageX, pageY, metrics, imageCache) {
       entry.placement.crop,
       fullBounds,
       visibleBounds,
+      {
+        muted: entry.isCard && !isCardOwned(entry.image),
+        rounded: entry.isCard && isCardOwned(entry.image),
+      },
     );
   }
 }
@@ -4020,9 +4257,14 @@ function drawPocket(ctx, x, y, width, height) {
   ctx.stroke();
 }
 
-function drawPlacementSegment(ctx, image, crop, fullBounds, visibleBounds) {
+function drawPlacementSegment(ctx, image, crop, fullBounds, visibleBounds, options = {}) {
   const safeCrop = normalizeCrop(crop);
-  roundRectPath(ctx, visibleBounds.x, visibleBounds.y, visibleBounds.width, visibleBounds.height, 7);
+  if (options.rounded) {
+    roundRectPath(ctx, visibleBounds.x, visibleBounds.y, visibleBounds.width, visibleBounds.height, 7);
+  } else {
+    ctx.beginPath();
+    ctx.rect(visibleBounds.x, visibleBounds.y, visibleBounds.width, visibleBounds.height);
+  }
   ctx.save();
   ctx.clip();
   ctx.fillStyle = "#ece7dc";
@@ -4049,13 +4291,20 @@ function drawPlacementSegment(ctx, image, crop, fullBounds, visibleBounds) {
   );
   ctx.rotate((safeCrop.rotate * Math.PI) / 180);
   ctx.scale(safeCrop.scale, safeCrop.scale);
+  if (options.muted) {
+    ctx.filter = "grayscale(1) opacity(0.45)";
+  }
   ctx.drawImage(image, -drawWidth / 2, -drawHeight / 2, drawWidth, drawHeight);
   ctx.restore();
 
-  roundRectPath(ctx, visibleBounds.x, visibleBounds.y, visibleBounds.width, visibleBounds.height, 7);
   ctx.strokeStyle = "rgba(55, 61, 67, 0.35)";
   ctx.lineWidth = 1;
-  ctx.stroke();
+  if (options.rounded) {
+    roundRectPath(ctx, visibleBounds.x, visibleBounds.y, visibleBounds.width, visibleBounds.height, 7);
+    ctx.stroke();
+  } else {
+    ctx.strokeRect(visibleBounds.x, visibleBounds.y, visibleBounds.width, visibleBounds.height);
+  }
 }
 
 function loadCanvasImage(src) {
