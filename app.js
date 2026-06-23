@@ -2242,11 +2242,14 @@ function createPagePreview(page, grid) {
     trash.title = "Delete from layout";
     item.append(trash);
 
-    const edit = document.createElement("span");
-    edit.className = "placement-edit";
-    edit.textContent = "Edit";
-    edit.title = "Edit placement";
-    item.append(edit);
+    const isCardPlacement = state.project.cards.some((card) => card.id === placement.imageId);
+    if (!isCardPlacement) {
+      const edit = document.createElement("span");
+      edit.className = "placement-edit";
+      edit.textContent = "Edit";
+      edit.title = "Edit placement";
+      item.append(edit);
+    }
 
     item.addEventListener("click", (event) => {
       event.stopPropagation();
@@ -2256,6 +2259,9 @@ function createPagePreview(page, grid) {
       }
 
       if (event.target.closest(".placement-edit")) {
+        if (isCardPlacement) {
+          return;
+        }
         openPlacementEditModal(page.id, placement.id);
         return;
       }
