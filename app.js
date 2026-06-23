@@ -5,6 +5,7 @@ const INDEXED_DB_NAME = "michiBinderCreator";
 const INDEXED_DB_STORE = "projects";
 const INDEXED_DB_CURRENT_PROJECT_ID = "current";
 const SIDEBAR_WIDTH_KEY = "michiBinderCreator.sidebarWidth.v1";
+const EXPORT_SETTINGS_KEY = "michiBinderCreator.exportSettings.v1";
 const BINDER_ZOOM_MIN = 0.05;
 const BINDER_ZOOM_MAX = 2;
 const SIDEBAR_WIDTH_MIN = 240;
@@ -23,12 +24,21 @@ const PDF_LABEL_HEIGHT_MM = 6;
 const PDF_LABEL_GAP_MM = 1.5;
 const PDF_IMAGE_PX_PER_MM = 6;
 const PDF_POINTS_PER_MM = 72 / 25.4;
+const CARD_SEARCH_PAGE_SIZE = 24;
 
 const DEFAULT_CROP = {
   scale: 1,
   x: 0,
   y: 0,
   rotate: 0,
+};
+
+const DEFAULT_EXPORT_SETTINGS = {
+  pageRange: "",
+  includePageTitles: true,
+  includeAllCards: false,
+  includeNeededCards: true,
+  printNeededCardsGreyscale: true,
 };
 
 // One project object drives the whole app and is serialized directly to localStorage/JSON.
@@ -42,8 +52,14 @@ const state = {
   projectSetupRequested: false,
   cardSearchResults: [],
   cardSearchLoading: false,
+  cardSearchQuery: "",
+  cardSearchPage: 0,
+  cardSearchHasMore: false,
   cardInsertSearchResults: [],
   cardInsertSearchLoading: false,
+  cardInsertSearchQuery: "",
+  cardInsertSearchPage: 0,
+  cardInsertSearchHasMore: false,
   imageSearchQuery: "",
   imageImportItems: [],
   imageImportIndex: 0,
@@ -53,6 +69,7 @@ const state = {
   draggedCardAssetId: null,
   imagePlacementDraft: null,
   pendingImagePlacement: null,
+  imageOverlapChoiceResolver: null,
   imageNaturalSizes: new Map(),
   imageNaturalSizeLoads: new Set(),
   imagePlacementPanGesture: null,
@@ -61,6 +78,7 @@ const state = {
   binderZoom: 1,
   fitToDisplay: true,
   centerBinder: true,
+  exportSettings: loadExportSettings(),
   sidebarWidth: clampInteger(localStorage.getItem(SIDEBAR_WIDTH_KEY), SIDEBAR_WIDTH_MIN, SIDEBAR_WIDTH_MAX, 320),
   sidebarResizeGesture: null,
   binderPanX: 0,
@@ -122,6 +140,11 @@ const els = {
   imagePlacementResetCropButton: document.querySelector("#imagePlacementResetCropButton"),
   imagePlacementCancelButton: document.querySelector("#imagePlacementCancelButton"),
   imagePlacementStartButton: document.querySelector("#imagePlacementStartButton"),
+  imageOverlapModal: document.querySelector("#imageOverlapModal"),
+  imageOverlapText: document.querySelector("#imageOverlapText"),
+  imageOverlapOverButton: document.querySelector("#imageOverlapOverButton"),
+  imageOverlapUnderButton: document.querySelector("#imageOverlapUnderButton"),
+  imageOverlapCancelButton: document.querySelector("#imageOverlapCancelButton"),
   helpButton: document.querySelector("#helpButton"),
   helpModal: document.querySelector("#helpModal"),
   helpCloseButton: document.querySelector("#helpCloseButton"),
@@ -150,6 +173,15 @@ const els = {
   exportJsonButton: document.querySelector("#exportJsonButton"),
   importJsonButton: document.querySelector("#importJsonButton"),
   importJsonInput: document.querySelector("#importJsonInput"),
+  exportSettingsButton: document.querySelector("#exportSettingsButton"),
+  exportSettingsModal: document.querySelector("#exportSettingsModal"),
+  exportSettingsForm: document.querySelector("#exportSettingsForm"),
+  exportSettingsCancelButton: document.querySelector("#exportSettingsCancelButton"),
+  exportPageRangeInput: document.querySelector("#exportPageRangeInput"),
+  exportIncludeTitlesInput: document.querySelector("#exportIncludeTitlesInput"),
+  exportIncludeAllCardsInput: document.querySelector("#exportIncludeAllCardsInput"),
+  exportIncludeNeededCardsInput: document.querySelector("#exportIncludeNeededCardsInput"),
+  exportNeededGreyscaleInput: document.querySelector("#exportNeededGreyscaleInput"),
   exportPngButton: document.querySelector("#exportPngButton"),
   exportPdfButton: document.querySelector("#exportPdfButton"),
   statusText: document.querySelector("#statusText"),
@@ -219,6 +251,29 @@ function loadProject() {
     console.warn("Could not load saved binder project.", error);
     return createDefaultProject();
   }
+}
+
+function loadExportSettings() {
+  try {
+    return normalizeExportSettings(JSON.parse(localStorage.getItem(EXPORT_SETTINGS_KEY) || "null"));
+  } catch (error) {
+    console.warn("Could not load export settings.", error);
+    return { ...DEFAULT_EXPORT_SETTINGS };
+  }
+}
+
+function normalizeExportSettings(settings) {
+  return {
+    pageRange: typeof settings?.pageRange === "string" ? settings.pageRange : DEFAULT_EXPORT_SETTINGS.pageRange,
+    includePageTitles: settings?.includePageTitles !== false,
+    includeAllCards: settings?.includeAllCards === true,
+    includeNeededCards: settings?.includeNeededCards !== false,
+    printNeededCardsGreyscale: settings?.printNeededCardsGreyscale !== false,
+  };
+}
+
+function persistExportSettings() {
+  localStorage.setItem(EXPORT_SETTINGS_KEY, JSON.stringify(state.exportSettings));
 }
 
 function normalizeProject(input) {
@@ -338,7 +393,16 @@ function normalizePlacement(placement, assetIds) {
     rowSpan: clampInteger(placement.rowSpan, 1, 8, 1),
     colSpan: clampInteger(placement.colSpan, 1, 8, 1),
     crop: normalizeCrop(placement.crop),
+    layer: normalizePlacementLayer(placement.layer),
   };
+}
+
+function normalizePlacementLayer(layer) {
+  if (layer === null || layer === undefined || layer === "") {
+    return null;
+  }
+  const parsed = Number(layer);
+  return Number.isFinite(parsed) ? parsed : null;
 }
 
 function normalizeCrop(crop) {
@@ -506,8 +570,14 @@ function resetTransientProjectState() {
   state.projectSetupRequested = false;
   state.cardSearchResults = [];
   state.cardSearchLoading = false;
+  state.cardSearchQuery = "";
+  state.cardSearchPage = 0;
+  state.cardSearchHasMore = false;
   state.cardInsertSearchResults = [];
   state.cardInsertSearchLoading = false;
+  state.cardInsertSearchQuery = "";
+  state.cardInsertSearchPage = 0;
+  state.cardInsertSearchHasMore = false;
   state.imageSearchQuery = "";
   state.imageImportItems = [];
   state.imageImportIndex = 0;
@@ -517,6 +587,7 @@ function resetTransientProjectState() {
   state.draggedCardAssetId = null;
   state.imagePlacementDraft = null;
   state.pendingImagePlacement = null;
+  state.imageOverlapChoiceResolver = null;
   state.hoveredSlot = null;
   state.binderZoom = 1;
   state.fitToDisplay = true;
@@ -649,6 +720,108 @@ function openProjectSettingsModal() {
 
 function closeProjectSettingsModal() {
   els.projectSettingsModal.hidden = true;
+}
+
+function openExportSettingsModal() {
+  syncExportSettingsControls();
+  els.exportSettingsModal.hidden = false;
+  window.setTimeout(() => {
+    els.exportPageRangeInput.focus();
+  }, 0);
+}
+
+function closeExportSettingsModal() {
+  els.exportSettingsModal.hidden = true;
+}
+
+function syncExportSettingsControls() {
+  const settings = normalizeExportSettings(state.exportSettings);
+  els.exportPageRangeInput.value = settings.pageRange;
+  els.exportIncludeTitlesInput.checked = settings.includePageTitles;
+  els.exportIncludeAllCardsInput.checked = settings.includeAllCards;
+  els.exportIncludeNeededCardsInput.checked = settings.includeNeededCards;
+  els.exportNeededGreyscaleInput.checked = settings.printNeededCardsGreyscale;
+  updateExportSettingsControlState();
+}
+
+function saveExportSettingsFromControls() {
+  state.exportSettings = normalizeExportSettings({
+    pageRange: els.exportPageRangeInput.value.trim(),
+    includePageTitles: els.exportIncludeTitlesInput.checked,
+    includeAllCards: els.exportIncludeAllCardsInput.checked,
+    includeNeededCards: els.exportIncludeNeededCardsInput.checked,
+    printNeededCardsGreyscale: els.exportNeededGreyscaleInput.checked,
+  });
+  persistExportSettings();
+  closeExportSettingsModal();
+  setStatus("Export settings saved");
+}
+
+function updateExportSettingsControlState() {
+  els.exportNeededGreyscaleInput.disabled =
+    !els.exportIncludeAllCardsInput.checked && !els.exportIncludeNeededCardsInput.checked;
+}
+
+function getExportSettings() {
+  state.exportSettings = normalizeExportSettings(state.exportSettings);
+  return state.exportSettings;
+}
+
+function getExportPageSelection(settings = getExportSettings()) {
+  return parsePageRange(settings.pageRange, state.project.pages.length);
+}
+
+function parsePageRange(rangeText, totalPages) {
+  const text = String(rangeText || "").trim();
+  if (!text || text.toLowerCase() === "all") {
+    return {
+      pages: [...state.project.pages],
+      pageIndexes: state.project.pages.map((_, index) => index),
+      error: "",
+    };
+  }
+
+  const pageIndexes = [];
+  const seen = new Set();
+  const tokens = text.split(",").map((token) => token.trim()).filter(Boolean);
+  if (!tokens.length) {
+    return { pages: [], pageIndexes: [], error: "Page range is empty" };
+  }
+
+  for (const token of tokens) {
+    const rangeMatch = token.match(/^(\d+)\s*-\s*(\d+)$/);
+    const singleMatch = token.match(/^\d+$/);
+    let start;
+    let end;
+
+    if (rangeMatch) {
+      start = Number(rangeMatch[1]);
+      end = Number(rangeMatch[2]);
+    } else if (singleMatch) {
+      start = Number(token);
+      end = start;
+    } else {
+      return { pages: [], pageIndexes: [], error: `Invalid page range: ${token}` };
+    }
+
+    if (start < 1 || end < 1 || start > totalPages || end > totalPages || start > end) {
+      return { pages: [], pageIndexes: [], error: `Page range must be between 1 and ${totalPages}` };
+    }
+
+    for (let pageNumber = start; pageNumber <= end; pageNumber += 1) {
+      const pageIndex = pageNumber - 1;
+      if (!seen.has(pageIndex)) {
+        seen.add(pageIndex);
+        pageIndexes.push(pageIndex);
+      }
+    }
+  }
+
+  return {
+    pages: pageIndexes.map((pageIndex) => state.project.pages[pageIndex]).filter(Boolean),
+    pageIndexes,
+    error: "",
+  };
 }
 
 function saveProjectSettings() {
@@ -1106,6 +1279,21 @@ function bindEvents() {
     startPendingImagePlacement();
   });
 
+  els.imageOverlapOverButton.addEventListener("click", () => {
+    resolveImageOverlapChoice("overlap");
+  });
+  els.imageOverlapUnderButton.addEventListener("click", () => {
+    resolveImageOverlapChoice("underlap");
+  });
+  els.imageOverlapCancelButton.addEventListener("click", () => {
+    resolveImageOverlapChoice("cancel");
+  });
+  els.imageOverlapModal.addEventListener("click", (event) => {
+    if (event.target === els.imageOverlapModal) {
+      resolveImageOverlapChoice("cancel");
+    }
+  });
+
   els.newPageButton.addEventListener("click", (event) => {
     closeParentDetails(event.currentTarget);
     addPage();
@@ -1120,6 +1308,19 @@ function bindEvents() {
     els.importJsonInput.click();
   });
   els.importJsonInput.addEventListener("change", importProjectJson);
+  els.exportSettingsButton.addEventListener("click", openExportSettingsModal);
+  els.exportSettingsCancelButton.addEventListener("click", closeExportSettingsModal);
+  els.exportSettingsModal.addEventListener("click", (event) => {
+    if (event.target === els.exportSettingsModal) {
+      closeExportSettingsModal();
+    }
+  });
+  els.exportSettingsForm.addEventListener("submit", (event) => {
+    event.preventDefault();
+    saveExportSettingsFromControls();
+  });
+  els.exportIncludeAllCardsInput.addEventListener("change", updateExportSettingsControlState);
+  els.exportIncludeNeededCardsInput.addEventListener("change", updateExportSettingsControlState);
   els.exportPngButton.addEventListener("click", exportCurrentPagePng);
   els.exportPdfButton.addEventListener("click", exportCutSheetPdf);
 
@@ -1216,7 +1417,16 @@ function bindEvents() {
     await importImageFiles(files, "pasted-image");
   });
 
-  document.addEventListener("keydown", (event) => {
+  document.addEventListener("contextmenu", (event) => {
+    if (!state.placementClipboard) {
+      return;
+    }
+
+    event.preventDefault();
+    clearPlacementClipboard();
+  });
+
+  document.addEventListener("keydown", async (event) => {
     const editingText = ["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement?.tagName);
     const shortcut = event.ctrlKey || event.metaKey;
     const key = event.key.toLowerCase();
@@ -1239,7 +1449,21 @@ function bindEvents() {
       }
 
       event.preventDefault();
-      pastePlacementClipboard(targetSlot.pageId, targetSlot.row, targetSlot.col);
+      const targetPage = state.project.pages.find((page) => page.id === targetSlot.pageId);
+      const targetPlacement = targetPage
+        ? findPlacementAtSlot(targetPage, targetSlot.row, targetSlot.col)
+        : null;
+      await pastePlacementClipboardAtSlot(
+        targetSlot.pageId,
+        targetSlot.row,
+        targetSlot.col,
+        targetPlacement?.id ?? null,
+      );
+      return;
+    }
+
+    if (event.key === "Escape" && !els.imageOverlapModal.hidden) {
+      resolveImageOverlapChoice("cancel");
       return;
     }
 
@@ -1283,6 +1507,11 @@ function bindEvents() {
       state.hoveredSlot = null;
       setStatus("Image placement cancelled");
       renderAll();
+      return;
+    }
+
+    if (event.key === "Escape" && state.placementClipboard) {
+      clearPlacementClipboard();
       return;
     }
 
@@ -1838,24 +2067,46 @@ function renderCardSearchControls() {
     });
     els.cardSearchResults.append(result);
   });
+
+  if (state.cardSearchHasMore) {
+    const loadMore = document.createElement("button");
+    loadMore.type = "button";
+    loadMore.className = "load-more-button";
+    loadMore.disabled = state.cardSearchLoading;
+    loadMore.textContent = state.cardSearchLoading ? "Loading..." : "Load More";
+    loadMore.addEventListener("click", () => {
+      searchTcgdexCards({ append: true });
+    });
+    els.cardSearchResults.append(loadMore);
+  }
 }
 
-async function searchTcgdexCards() {
+async function searchTcgdexCards({ append = false } = {}) {
   const searchTerm = els.cardSearchInput.value.trim();
   if (!searchTerm) {
     clearCardSearch();
     return;
   }
 
+  const page = append && state.cardSearchQuery === searchTerm ? state.cardSearchPage + 1 : 1;
   state.cardSearchLoading = true;
-  state.cardSearchResults = [];
-  els.cardSearchStatus.textContent = "Searching cards";
+  state.cardSearchQuery = searchTerm;
+  if (!append) {
+    state.cardSearchResults = [];
+    state.cardSearchHasMore = false;
+  }
+  els.cardSearchStatus.textContent = append ? "Loading more cards" : "Searching cards";
   renderCardSearchControls();
 
   try {
-    state.cardSearchResults = await fetchTcgdexCardSearchResults(searchTerm);
+    const result = await fetchTcgdexCardSearchResults(searchTerm, page);
+    state.cardSearchResults = append
+      ? dedupeCardsById([...state.cardSearchResults, ...result.cards])
+      : result.cards;
+    state.cardSearchPage = page;
+    state.cardSearchHasMore = result.hasMore;
     els.cardSearchStatus.textContent = state.cardSearchResults.length
-      ? `${state.cardSearchResults.length} result${state.cardSearchResults.length === 1 ? "" : "s"}`
+      ? `${state.cardSearchResults.length} result${state.cardSearchResults.length === 1 ? "" : "s"}${state.cardSearchHasMore ? " shown" : ""}`
       : "No matching cards";
   } catch (error) {
     console.warn("TCGdex card search failed.", error);
@@ -1866,16 +2117,30 @@ async function searchTcgdexCards() {
   }
 }
 
-async function fetchTcgdexCardSearchResults(searchTerm) {
-  const query = buildTcgdexCardNameQuery(searchTerm);
-  if (!query.name) {
-    return [];
+async function fetchTcgdexCardSearchResults(searchTerm, page = 1) {
+  const queries = buildTcgdexCardNameQueries(searchTerm);
+  if (!queries.length) {
+    return { cards: [], hasMore: false };
   }
 
+  const resultSets = await Promise.all(
+    queries.map((query) => fetchTcgdexCardSearchPage(query, page)),
+  );
+  const cards = dedupeCardsById(
+    resultSets.flatMap((result) => result.cards).filter((card) => card.image),
+  );
+
+  return {
+    cards,
+    hasMore: resultSets.some((result) => result.hasMore),
+  };
+}
+
+async function fetchTcgdexCardSearchPage(query, page) {
   const params = new URLSearchParams({
-    name: query.name,
-    "pagination:page": "1",
-    "pagination:itemsPerPage": "24",
+    name: query,
+    "pagination:page": String(page),
+    "pagination:itemsPerPage": String(CARD_SEARCH_PAGE_SIZE),
     "sort:field": "name",
     "sort:order": "ASC",
   });
@@ -1886,38 +2151,94 @@ async function fetchTcgdexCardSearchResults(searchTerm) {
   }
 
   const result = await response.json();
-  return Array.isArray(result) ? result.filter((card) => card.image) : [];
+  const cards = Array.isArray(result) ? result : [];
+  return {
+    cards,
+    hasMore: cards.length >= CARD_SEARCH_PAGE_SIZE,
+  };
 }
 
-function buildTcgdexCardNameQuery(searchTerm) {
-  return {
-    name: searchTerm.replace(/[^\w\s.'-]/g, " ").replace(/\s+/g, " ").trim(),
-  };
+function buildTcgdexCardNameQueries(searchTerm) {
+  const clean = sanitizeCardSearchTerm(searchTerm);
+  const normalized = stripDiacritics(clean);
+  return [...new Set([
+    clean,
+    normalized,
+    addPokemonAccentVariant(normalized),
+  ].map(sanitizeCardSearchTerm).filter(Boolean))];
+}
+
+function sanitizeCardSearchTerm(searchTerm) {
+  return String(searchTerm || "")
+    .replace(/[^\p{L}\p{N}\s.'-]/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function stripDiacritics(text) {
+  return String(text || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+}
+
+function addPokemonAccentVariant(text) {
+  return String(text || "").replace(/poke/gi, (match) => {
+    if (match === match.toUpperCase()) {
+      return "POK\u00c9";
+    }
+    if (match[0] === match[0].toUpperCase()) {
+      return "Pok\u00e9";
+    }
+    return "pok\u00e9";
+  });
+}
+
+function dedupeCardsById(cards) {
+  const seen = new Set();
+  return cards.filter((card) => {
+    const key = card.id || `${card.name}-${card.localId || ""}`;
+    if (seen.has(key)) {
+      return false;
+    }
+    seen.add(key);
+    return true;
+  });
 }
 
 function clearCardSearch() {
   state.cardSearchLoading = false;
   state.cardSearchResults = [];
+  state.cardSearchQuery = "";
+  state.cardSearchPage = 0;
+  state.cardSearchHasMore = false;
   els.cardSearchStatus.textContent = "";
   renderCardSearchControls();
 }
 
-async function searchCardInsertTcgdexCards() {
+async function searchCardInsertTcgdexCards({ append = false } = {}) {
   const searchTerm = els.cardInsertSearchInput.value.trim();
   if (!searchTerm) {
     clearCardInsertSearch();
     return;
   }
 
+  const page = append && state.cardInsertSearchQuery === searchTerm ? state.cardInsertSearchPage + 1 : 1;
   state.cardInsertSearchLoading = true;
-  state.cardInsertSearchResults = [];
-  els.cardInsertSearchStatus.textContent = "Searching cards";
+  state.cardInsertSearchQuery = searchTerm;
+  if (!append) {
+    state.cardInsertSearchResults = [];
+    state.cardInsertSearchHasMore = false;
+  }
+  els.cardInsertSearchStatus.textContent = append ? "Loading more cards" : "Searching cards";
   renderCardInsertPrompt();
 
   try {
-    state.cardInsertSearchResults = await fetchTcgdexCardSearchResults(searchTerm);
+    const result = await fetchTcgdexCardSearchResults(searchTerm, page);
+    state.cardInsertSearchResults = append
+      ? dedupeCardsById([...state.cardInsertSearchResults, ...result.cards])
+      : result.cards;
+    state.cardInsertSearchPage = page;
+    state.cardInsertSearchHasMore = result.hasMore;
     els.cardInsertSearchStatus.textContent = state.cardInsertSearchResults.length
-      ? `${state.cardInsertSearchResults.length} result${state.cardInsertSearchResults.length === 1 ? "" : "s"}`
+      ? `${state.cardInsertSearchResults.length} result${state.cardInsertSearchResults.length === 1 ? "" : "s"}${state.cardInsertSearchHasMore ? " shown" : ""}`
       : "No matching cards";
   } catch (error) {
     console.warn("TCGdex insert card search failed.", error);
@@ -1931,6 +2252,9 @@ async function searchCardInsertTcgdexCards() {
 function clearCardInsertSearch() {
   state.cardInsertSearchLoading = false;
   state.cardInsertSearchResults = [];
+  state.cardInsertSearchQuery = "";
+  state.cardInsertSearchPage = 0;
+  state.cardInsertSearchHasMore = false;
   els.cardInsertSearchStatus.textContent = "";
   renderCardInsertPrompt();
 }
@@ -2149,7 +2473,7 @@ function renderImageLibrary() {
     item.tabIndex = 0;
     item.setAttribute("role", "button");
     item.setAttribute("aria-label", `Select ${image.name}`);
-    item.innerHTML = `<img alt=""><span></span><button type="button" class="place-image-button">Place</button><button type="button" class="rename-image-button">Rename</button>`;
+    item.innerHTML = `<img alt=""><span></span><button type="button" class="place-image-button">Place</button><button type="button" class="rename-image-button">Rename</button><button type="button" class="delete-image-button danger">Delete</button>`;
     item.querySelector("img").src = image.dataUrl;
     item.querySelector("img").alt = image.name;
     item.querySelector("span").textContent = image.name;
@@ -2160,6 +2484,10 @@ function renderImageLibrary() {
     item.querySelector(".rename-image-button").addEventListener("click", (event) => {
       event.stopPropagation();
       renameImageAsset(image.id);
+    });
+    item.querySelector(".delete-image-button").addEventListener("click", (event) => {
+      event.stopPropagation();
+      deleteImageAsset(image.id);
     });
     item.addEventListener("click", () => {
       state.selectedImageId = image.id;
@@ -2195,6 +2523,52 @@ function renameImageAsset(imageId) {
 
   image.name = trimmedName;
   saveProject("Image renamed");
+  renderAll();
+}
+
+function deleteImageAsset(imageId) {
+  const image = state.project.images.find((candidate) => candidate.id === imageId);
+  if (!image) return;
+
+  const placementCount = state.project.pages.reduce(
+    (count, page) => count + page.placements.filter((placement) => placement.imageId === imageId).length,
+    0,
+  );
+  const message = placementCount
+    ? `Delete "${image.name}" and remove ${placementCount} placement${placementCount === 1 ? "" : "s"} from the binder?`
+    : `Delete "${image.name}"?`;
+  if (!window.confirm(message)) {
+    return;
+  }
+
+  state.project.images = state.project.images.filter((candidate) => candidate.id !== imageId);
+  state.project.pages.forEach((page) => {
+    page.placements = page.placements.filter((placement) => placement.imageId !== imageId);
+  });
+
+  if (state.selectedImageId === imageId) {
+    state.selectedImageId = state.project.images[0]?.id || null;
+  }
+  if (state.selectedPlacementId) {
+    const selectedStillExists = state.project.pages.some((page) =>
+      page.placements.some((placement) => placement.id === state.selectedPlacementId),
+    );
+    if (!selectedStillExists) {
+      state.selectedPlacementId = null;
+    }
+  }
+  if (state.pendingImagePlacement?.imageId === imageId) {
+    state.pendingImagePlacement = null;
+  }
+  if (state.imagePlacementDraft?.imageId === imageId) {
+    state.imagePlacementDraft = null;
+  }
+  if (state.placementClipboard?.placement?.imageId === imageId) {
+    state.placementClipboard = null;
+  }
+  state.imageNaturalSizes.delete(imageId);
+
+  saveProject("Image deleted");
   renderAll();
 }
 
@@ -2238,6 +2612,31 @@ function openPlacementEditModal(pageId, placementId) {
 function closeImagePlacementModal() {
   state.imagePlacementDraft = null;
   renderAll();
+}
+
+function requestImageOverlapChoice(overlappingPlacements) {
+  if (state.imageOverlapChoiceResolver) {
+    resolveImageOverlapChoice("cancel");
+  }
+
+  return new Promise((resolve) => {
+    state.imageOverlapChoiceResolver = resolve;
+    els.imageOverlapText.textContent =
+      `This image overlaps ${formatPlacementCount(overlappingPlacements.length, "existing placement")}. Choose whether the new image should sit over or under the existing layout.`;
+    els.imageOverlapModal.hidden = false;
+    window.setTimeout(() => {
+      els.imageOverlapOverButton.focus();
+    }, 0);
+  });
+}
+
+function resolveImageOverlapChoice(choice) {
+  const resolver = state.imageOverlapChoiceResolver;
+  state.imageOverlapChoiceResolver = null;
+  els.imageOverlapModal.hidden = true;
+  if (resolver) {
+    resolver(choice);
+  }
 }
 
 function updateImagePlacementDraftSpan() {
@@ -2518,11 +2917,23 @@ function renderCardInsertPrompt() {
         renderAfterImport: false,
       });
       if (cardAsset) {
-        placeCardInPendingSlot(cardAsset.id);
+        await placeCardInPendingSlot(cardAsset.id);
       }
     });
     els.cardInsertSearchResults.append(result);
   });
+
+  if (state.cardInsertSearchHasMore) {
+    const loadMore = document.createElement("button");
+    loadMore.type = "button";
+    loadMore.className = "load-more-button";
+    loadMore.disabled = state.cardInsertSearchLoading;
+    loadMore.textContent = state.cardInsertSearchLoading ? "Loading..." : "Load More";
+    loadMore.addEventListener("click", () => {
+      searchCardInsertTcgdexCards({ append: true });
+    });
+    els.cardInsertSearchResults.append(loadMore);
+  }
 }
 
 function openCardInsertPrompt(pageId, row, col) {
@@ -2533,6 +2944,9 @@ function openCardInsertPrompt(pageId, row, col) {
   state.selectedPlacementId = null;
   state.cardInsertSearchResults = [];
   state.cardInsertSearchLoading = false;
+  state.cardInsertSearchQuery = "";
+  state.cardInsertSearchPage = 0;
+  state.cardInsertSearchHasMore = false;
   state.pendingCardSlot = { pageId, row, col };
   if (document.activeElement !== els.cardInsertSearchInput) {
     els.cardInsertSearchInput.value = "";
@@ -2551,6 +2965,9 @@ function closeCardInsertPrompt() {
   state.pendingCardSlot = null;
   state.cardInsertSearchResults = [];
   state.cardInsertSearchLoading = false;
+  state.cardInsertSearchQuery = "";
+  state.cardInsertSearchPage = 0;
+  state.cardInsertSearchHasMore = false;
   els.cardInsertSearchInput.value = "";
   els.cardInsertSearchStatus.textContent = "";
   renderAll();
@@ -2615,14 +3032,14 @@ function getClipboardHoverPlacement(pageId) {
   };
 }
 
-function placeCardInPendingSlot(cardId) {
+async function placeCardInPendingSlot(cardId) {
   const pendingSlot = state.pendingCardSlot;
   if (!pendingSlot) return;
 
-  placeCardAtSlot(cardId, pendingSlot.pageId, pendingSlot.row, pendingSlot.col);
+  await placeCardAtSlot(cardId, pendingSlot.pageId, pendingSlot.row, pendingSlot.col);
 }
 
-function placeCardAtSlot(cardId, pageId, row, col) {
+async function placeCardAtSlot(cardId, pageId, row, col) {
   const card = getCard(cardId);
   const page = state.project.pages.find((candidate) => candidate.id === pageId);
   if (!card || !page) {
@@ -2640,7 +3057,7 @@ function placeCardAtSlot(cardId, pageId, row, col) {
     crop: { ...DEFAULT_CROP },
   };
 
-  const overlapPlan = confirmPlacementOverlapPlan(page, nextPlacement, { allowLayerOnImages: true });
+  const overlapPlan = await confirmPlacementOverlapPlan(page, nextPlacement, { allowLayerOnImages: true });
   if (!overlapPlan) {
     return false;
   }
@@ -2778,17 +3195,17 @@ function createPagePreview(page, grid) {
               renderAfterImport: false,
             });
         if (cardAsset) {
-          placeCardAtSlot(cardAsset.id, page.id, row, col);
+          await placeCardAtSlot(cardAsset.id, page.id, row, col);
         }
       });
-      pocket.addEventListener("click", (event) => {
+      pocket.addEventListener("click", async (event) => {
         event.stopPropagation();
         if (state.placementClipboard) {
-          pastePlacementClipboard(page.id, row, col);
+          await pastePlacementClipboardAtSlot(page.id, row, col);
           return;
         }
         if (state.pendingImagePlacement) {
-          placePendingImage(page.id, row, col);
+          await placePendingImage(page.id, row, col);
           return;
         }
         openCardInsertPrompt(page.id, row, col);
@@ -2871,14 +3288,6 @@ function createPagePreview(page, grid) {
     }
 
     item.addEventListener("mousemove", (event) => {
-      if (
-        !state.pendingImagePlacement &&
-        !state.placementClipboard &&
-        !state.draggedCardResult &&
-        !state.draggedCardAssetId
-      ) {
-        return;
-      }
       const slot = getSlotFromBinderGridEvent(event, binderGrid, grid);
       if (slot) {
         setHoveredSlot({ pageId: page.id, row: slot.row, col: slot.col });
@@ -2926,11 +3335,11 @@ function createPagePreview(page, grid) {
             renderAfterImport: false,
           });
       if (cardAsset) {
-        placeCardAtSlot(cardAsset.id, page.id, slot.row, slot.col);
+        await placeCardAtSlot(cardAsset.id, page.id, slot.row, slot.col);
       }
     });
 
-    item.addEventListener("click", (event) => {
+    item.addEventListener("click", async (event) => {
       event.stopPropagation();
       if (event.target.closest(".placement-trash")) {
         deletePlacement(page.id, placement.id);
@@ -2953,7 +3362,7 @@ function createPagePreview(page, grid) {
       if (state.pendingImagePlacement) {
         const slot = getSlotFromBinderGridEvent(event, binderGrid, grid);
         if (slot) {
-          placePendingImage(page.id, slot.row, slot.col);
+          await placePendingImage(page.id, slot.row, slot.col);
         } else {
           setStatus("Click inside a card slot to place the image");
         }
@@ -2963,10 +3372,11 @@ function createPagePreview(page, grid) {
       if (state.placementClipboard) {
         const slot = getSlotFromBinderGridEvent(event, binderGrid, grid);
         if (slot) {
-          pastePlacementClipboard(page.id, slot.row, slot.col);
-        } else {
-          setStatus("Click inside a card slot to paste");
+          await pastePlacementClipboardAtSlot(page.id, slot.row, slot.col, placement.id);
+          return;
         }
+
+        setStatus("Click inside a card slot to paste");
         return;
       }
 
@@ -3040,7 +3450,7 @@ function cropToTransform(crop) {
   return `translate(${safeCrop.x}%, ${safeCrop.y}%) rotate(${safeCrop.rotate}deg) scale(${safeCrop.scale})`;
 }
 
-function placePendingImage(pageId, row, col) {
+async function placePendingImage(pageId, row, col) {
   const page = state.project.pages.find((candidate) => candidate.id === pageId);
   if (!page) return;
   const grid = getProjectGrid();
@@ -3069,11 +3479,12 @@ function placePendingImage(pageId, row, col) {
     return;
   }
 
-  const overlapPlan = confirmPlacementOverlapPlan(page, nextPlacement, { allowLayerOnImages: true });
+  const overlapPlan = await confirmPlacementOverlapPlan(page, nextPlacement, { allowLayerOnImages: true });
   if (!overlapPlan) {
     return;
   }
 
+  applyOverlapLayerChoice(page, nextPlacement, overlapPlan);
   removePlannedOverlaps(page, overlapPlan);
   page.placements.push(nextPlacement);
   state.selectedPlacementId = nextPlacement.id;
@@ -3120,8 +3531,33 @@ function isImagePlacement(placement) {
 function getPlacementsInRenderOrder(page) {
   return page.placements
     .map((placement, index) => ({ placement, index }))
-    .sort((a, b) => Number(isCardPlacement(a.placement)) - Number(isCardPlacement(b.placement)) || a.index - b.index)
+    .sort((a, b) => getPlacementLayer(a.placement, a.index) - getPlacementLayer(b.placement, b.index) || a.index - b.index)
     .map((entry) => entry.placement);
+}
+
+function findPlacementAtSlot(page, row, col) {
+  return getPlacementsInRenderOrder(page)
+    .slice()
+    .reverse()
+    .find((placement) => placementCoversSlot(placement, row, col)) || null;
+}
+
+function placementCoversSlot(placement, row, col) {
+  return (
+    row >= placement.row &&
+    row < placement.row + placement.rowSpan &&
+    col >= placement.col &&
+    col < placement.col + placement.colSpan
+  );
+}
+
+function getPlacementLayer(placement, index = 0) {
+  const explicitLayer = normalizePlacementLayer(placement?.layer);
+  if (explicitLayer !== null) {
+    return explicitLayer;
+  }
+
+  return index + (isCardPlacement(placement) ? 10000 : 0);
 }
 
 function getSegmentedPlacementRenderEntries(page) {
@@ -3221,11 +3657,24 @@ function getVisiblePlacementSegments(placement, blockers) {
   return segments;
 }
 
-function confirmPlacementOverlapPlan(page, nextPlacement, options = {}) {
+async function confirmPlacementOverlapPlan(page, nextPlacement, options = {}) {
   const ignoredIds = new Set(options.ignoredPlacementIds || []);
   const overlapping = page.placements.filter(
     (placement) => !ignoredIds.has(placement.id) && placementsOverlap(placement, nextPlacement),
   );
+  const nextIsImage = isImagePlacement(nextPlacement);
+  if (nextIsImage && options.allowLayerOnImages && overlapping.length) {
+    const choice = await requestImageOverlapChoice(overlapping);
+    if (choice === "cancel") {
+      return null;
+    }
+    return {
+      replaceOverlaps: [],
+      overlapping,
+      layerChoice: choice,
+    };
+  }
+
   const canLayerOnImages = options.allowLayerOnImages || (options.allowCardOnImages && isCardPlacement(nextPlacement));
   const layeredImageOverlaps = canLayerOnImages ? overlapping.filter(isImagePlacement) : [];
   const replaceOverlaps = canLayerOnImages
@@ -3252,6 +3701,21 @@ function confirmPlacementOverlapPlan(page, nextPlacement, options = {}) {
   }
 
   return { replaceOverlaps };
+}
+
+function applyOverlapLayerChoice(page, nextPlacement, overlapPlan) {
+  if (!overlapPlan?.layerChoice || !overlapPlan.overlapping?.length) {
+    return;
+  }
+
+  const overlapLayers = overlapPlan.overlapping.map((placement) =>
+    getPlacementLayer(placement, page.placements.indexOf(placement)),
+  );
+  if (overlapPlan.layerChoice === "overlap") {
+    nextPlacement.layer = Math.max(...overlapLayers) + 1;
+  } else if (overlapPlan.layerChoice === "underlap") {
+    nextPlacement.layer = Math.min(...overlapLayers) - 1;
+  }
 }
 
 function formatPlacementCount(count, label) {
@@ -3317,12 +3781,19 @@ function setCardPlacementClipboard(cardAsset) {
   return true;
 }
 
+function clearPlacementClipboard(message = "Clipboard cleared") {
+  state.placementClipboard = null;
+  state.hoveredSlot = null;
+  setStatus(message);
+  renderAll();
+}
+
 function copySelectedPlacement(mode = "copy") {
   const page = getCurrentPage();
   const placement = getSelectedPlacement();
   const asset = placement ? getImage(placement.imageId) : null;
   if (!page || !placement || !asset) {
-    setStatus("Select a placed card first");
+    setStatus("Select a placed item first");
     return false;
   }
 
@@ -3343,7 +3814,171 @@ function copySelectedPlacement(mode = "copy") {
   return true;
 }
 
-function pastePlacementClipboard(pageId, row, col) {
+function getClipboardSourcePlacement(clipboard = state.placementClipboard) {
+  if (!clipboard?.sourcePageId || !clipboard.sourcePlacementId) {
+    return null;
+  }
+
+  const sourcePage = state.project.pages.find((page) => page.id === clipboard.sourcePageId);
+  const sourcePlacement = sourcePage?.placements.find((placement) => placement.id === clipboard.sourcePlacementId);
+  return sourcePage && sourcePlacement ? { sourcePage, sourcePlacement } : null;
+}
+
+function swapClipboardIntoSlot(targetPageId, row, col, targetPlacementId = null) {
+  const source = getClipboardSourcePlacement();
+  const targetPage = state.project.pages.find((page) => page.id === targetPageId);
+  if (!source || !targetPage) {
+    clearPlacementClipboard("Nothing to swap");
+    return false;
+  }
+
+  const { sourcePage, sourcePlacement } = source;
+  const sourceOriginal = { row: sourcePlacement.row, col: sourcePlacement.col };
+  if (sourcePage === targetPage && sourceOriginal.row === row && sourceOriginal.col === col) {
+    clearPlacementClipboard("Swap cancelled");
+    return true;
+  }
+
+  const nextSourcePlacement = {
+    ...sourcePlacement,
+    row,
+    col,
+  };
+  const targetPlacements = getSwapTargetPlacements(targetPage, nextSourcePlacement, targetPlacementId)
+    .filter((placement) => placement.id !== sourcePlacement.id);
+  if (!targetPlacements.length) {
+    return false;
+  }
+
+  if (
+    targetPlacements.length > 1 &&
+    targetPlacements.some((placement) => !placementContains(nextSourcePlacement, placement))
+  ) {
+    setStatus("Swap blocked by partial target overlap");
+    return false;
+  }
+
+  const nextTargetPlacements = targetPlacements.map((placement) => ({
+    placement,
+    nextPlacement: {
+      ...placement,
+      row: sourceOriginal.row + (placement.row - row),
+      col: sourceOriginal.col + (placement.col - col),
+    },
+  }));
+  const grid = getProjectGrid();
+  if (
+    !placementFits(nextSourcePlacement, grid.rows, grid.cols) ||
+    nextTargetPlacements.some(({ nextPlacement }) => !placementFits(nextPlacement, grid.rows, grid.cols))
+  ) {
+    setStatus("Swap blocked by binder bounds");
+    return false;
+  }
+
+  const ignoredIds = new Set([sourcePlacement.id, ...targetPlacements.map((placement) => placement.id)]);
+  const sourceWouldCollide = placementCollidesOnPage(targetPage, nextSourcePlacement, ignoredIds);
+  const targetsWouldCollide = nextTargetPlacements.some(({ nextPlacement }) =>
+    placementCollidesOnPage(sourcePage, nextPlacement, ignoredIds),
+  );
+  if (sourceWouldCollide || targetsWouldCollide) {
+    setStatus("Swap blocked by overlapping placement");
+    return false;
+  }
+
+  if (sourcePage !== targetPage) {
+    preserveExplicitLayerForMove(sourcePage, sourcePlacement);
+    targetPlacements.forEach((placement) => preserveExplicitLayerForMove(targetPage, placement));
+    sourcePage.placements = sourcePage.placements.filter((placement) => placement.id !== sourcePlacement.id);
+    targetPage.placements = targetPage.placements.filter((placement) => !ignoredIds.has(placement.id));
+    sourcePlacement.row = row;
+    sourcePlacement.col = col;
+    nextTargetPlacements.forEach(({ placement, nextPlacement }) => {
+      placement.row = nextPlacement.row;
+      placement.col = nextPlacement.col;
+    });
+    targetPage.placements.push(sourcePlacement);
+    sourcePage.placements.push(...targetPlacements);
+  } else {
+    sourcePlacement.row = row;
+    sourcePlacement.col = col;
+    nextTargetPlacements.forEach(({ placement, nextPlacement }) => {
+      placement.row = nextPlacement.row;
+      placement.col = nextPlacement.col;
+    });
+  }
+
+  state.currentPageId = targetPage.id;
+  state.selectedPlacementId = sourcePlacement.id;
+  state.pendingCardSlot = null;
+  state.placementClipboard = null;
+  state.hoveredSlot = null;
+  saveProject(`${targetPlacements.length + 1} placements swapped`);
+  renderAll();
+  return true;
+}
+
+function preserveExplicitLayerForMove(page, placement) {
+  if (normalizePlacementLayer(placement.layer) !== null) {
+    return;
+  }
+
+  placement.layer = getPlacementLayer(placement, page.placements.indexOf(placement));
+}
+
+function placementCollidesOnPage(page, candidate, ignoredIds = new Set()) {
+  return page.placements.some(
+    (placement) => !ignoredIds.has(placement.id) && placementsOverlap(placement, candidate),
+  );
+}
+
+function getSwapTargetPlacements(page, footprint, targetPlacementId = null) {
+  const targets = new Map();
+  for (let row = footprint.row; row < footprint.row + footprint.rowSpan; row += 1) {
+    for (let col = footprint.col; col < footprint.col + footprint.colSpan; col += 1) {
+      const placement = findPlacementAtSlot(page, row, col);
+      if (placement) {
+        targets.set(placement.id, placement);
+      }
+    }
+  }
+
+  if (targetPlacementId) {
+    const clickedPlacement = page.placements.find((placement) => placement.id === targetPlacementId);
+    if (clickedPlacement && placementsOverlap(clickedPlacement, footprint)) {
+      targets.set(clickedPlacement.id, clickedPlacement);
+    }
+  }
+
+  return [...targets.values()];
+}
+
+function placementContains(container, placement) {
+  return (
+    placement.row >= container.row &&
+    placement.col >= container.col &&
+    placement.row + placement.rowSpan <= container.row + container.rowSpan &&
+    placement.col + placement.colSpan <= container.col + container.colSpan
+  );
+}
+
+async function pastePlacementClipboardAtSlot(pageId, row, col, targetPlacementId = null) {
+  const clipboard = state.placementClipboard;
+  if (!clipboard) {
+    setStatus("Nothing to paste");
+    return false;
+  }
+
+  if (clipboard.sourcePlacementId) {
+    const swapped = swapClipboardIntoSlot(pageId, row, col, targetPlacementId);
+    if (swapped || !state.placementClipboard) {
+      return swapped;
+    }
+  }
+
+  return pastePlacementClipboard(pageId, row, col);
+}
+
+async function pastePlacementClipboard(pageId, row, col) {
   const clipboard = state.placementClipboard;
   const page = state.project.pages.find((candidate) => candidate.id === pageId);
   const asset = clipboard ? getImage(clipboard.placement.imageId) : null;
@@ -3368,7 +4003,7 @@ function pastePlacementClipboard(pageId, row, col) {
     return false;
   }
 
-  const overlapPlan = confirmPlacementOverlapPlan(page, nextPlacement, {
+  const overlapPlan = await confirmPlacementOverlapPlan(page, nextPlacement, {
     allowLayerOnImages: true,
     ignoredPlacementIds:
       clipboard.mode === "cut" && clipboard.sourcePageId === page.id ? [clipboard.sourcePlacementId] : [],
@@ -3386,6 +4021,7 @@ function pastePlacementClipboard(pageId, row, col) {
     }
   }
 
+  applyOverlapLayerChoice(page, nextPlacement, overlapPlan);
   removePlannedOverlaps(page, overlapPlan);
   page.placements.push(nextPlacement);
   state.currentPageId = page.id;
@@ -3711,32 +4347,50 @@ async function importProjectJson() {
 }
 
 async function exportCurrentPagePng() {
-  const pages = getCurrentSpreadPages();
-  if (!pages.length) return;
+  const settings = getExportSettings();
+  const pageSelection = getExportPageSelection(settings);
+  if (pageSelection.error) {
+    openExportSettingsModal();
+    setStatus(pageSelection.error);
+    return;
+  }
+  const pages = pageSelection.pages;
+  if (!pages.length) {
+    setStatus("No pages to export");
+    return;
+  }
 
   els.exportPngButton.disabled = true;
   setStatus("Rendering PNG");
 
   try {
-    const canvas = await renderSpreadToCanvas(pages);
+    const canvas = await renderSpreadToCanvas(pages, settings);
     const url = canvas.toDataURL("image/png");
     const anchor = document.createElement("a");
     anchor.href = url;
     anchor.download = `${safeFileName(getSpreadExportName(pages))}.png`;
     anchor.click();
-    setStatus("View PNG exported");
+    setStatus("PNG exported");
   } catch (error) {
     console.warn("Could not export PNG.", error);
-    setStatus("View PNG export failed");
+    setStatus("PNG export failed");
   } finally {
     els.exportPngButton.disabled = false;
   }
 }
 
 async function exportCutSheetPdf() {
-  const cutouts = getProjectPdfCutouts();
+  const settings = getExportSettings();
+  const pageSelection = getExportPageSelection(settings);
+  if (pageSelection.error) {
+    openExportSettingsModal();
+    setStatus(pageSelection.error);
+    return;
+  }
+
+  const cutouts = getProjectPdfCutouts(settings, pageSelection);
   if (!cutouts.length) {
-    setStatus("No image or needed card cutouts to export");
+    setStatus("No matching cutouts to export");
     return;
   }
 
@@ -3756,15 +4410,19 @@ async function exportCutSheetPdf() {
   }
 }
 
-function getProjectPdfCutouts() {
+function getProjectPdfCutouts(settings = getExportSettings(), pageSelection = getExportPageSelection(settings)) {
   const layout = getProjectLayout();
   const cutouts = [];
+  const selectedPageIndexes = new Set(pageSelection.pageIndexes);
 
-  state.project.pages.forEach((page) => {
+  state.project.pages.forEach((page, pageIndex) => {
+    if (!selectedPageIndexes.has(pageIndex)) return;
+
     const pageNumber = getPageNumber(page);
     getSegmentedPlacementRenderEntries(page).forEach((entry) => {
       const isNeededCard = entry.isCard && !isCardOwned(entry.image);
-      if (!isNeededCard && !isImagePlacement(entry.placement)) return;
+      const includeCard = entry.isCard && (settings.includeAllCards || (settings.includeNeededCards && isNeededCard));
+      if (!includeCard && !isImagePlacement(entry.placement)) return;
 
       const visiblePlacement = entry.segment || entry.placement;
       const fullDimensions = getPlacementDimensions(entry.placement.colSpan, entry.placement.rowSpan, layout);
@@ -3773,12 +4431,13 @@ function getProjectPdfCutouts() {
       const sourceOffsetY = entry.segment ? entry.segment.sourceRow * (layout.pocketHeight + layout.gapY) : 0;
       const segmentText = entry.segmentCount > 1 ? ` segment ${entry.segmentIndex + 1}/${entry.segmentCount}` : "";
       const cardText = isNeededCard ? " needed card" : "";
+      const titleText = settings.includePageTitles ? ` ${page.title || `Page ${pageNumber}`}` : "";
 
       cutouts.push({
         id: `${page.id}-${entry.placement.id}-${entry.segmentIndex}`,
         image: entry.image,
         crop: normalizeCrop(entry.placement.crop),
-        muted: isNeededCard,
+        muted: isNeededCard && settings.printNeededCardsGreyscale,
         pageNumber,
         row: visiblePlacement.row,
         col: visiblePlacement.col,
@@ -3790,7 +4449,7 @@ function getProjectPdfCutouts() {
         fullHeightMm: fullDimensions.height,
         sourceOffsetX,
         sourceOffsetY,
-        labelBase: `P${pageNumber} R${visiblePlacement.row + 1} C${visiblePlacement.col + 1} ${visiblePlacement.colSpan}x${visiblePlacement.rowSpan}${segmentText}${cardText}`,
+        labelBase: `P${pageNumber}${titleText} R${visiblePlacement.row + 1} C${visiblePlacement.col + 1} ${visiblePlacement.colSpan}x${visiblePlacement.rowSpan}${segmentText}${cardText}`,
       });
     });
   });
@@ -4091,9 +4750,10 @@ function getSpreadExportName(pages) {
   return `pages-${pages.map((page) => getPageNumber(page)).join("-")}`;
 }
 
-async function renderSpreadToCanvas(pages) {
+async function renderSpreadToCanvas(pages, settings = getExportSettings()) {
   const grid = getProjectGrid();
   const layout = getProjectLayout();
+  const exportSettings = normalizeExportSettings(settings);
   const exportScale = 180 / DEFAULT_PROJECT_LAYOUT.pocketWidth;
   const slotWidth = layout.pocketWidth * exportScale;
   const slotHeight = layout.pocketHeight * exportScale;
@@ -4102,7 +4762,7 @@ async function renderSpreadToCanvas(pages) {
   const padding = 28;
   const outerPadding = 28;
   const spreadGap = 26;
-  const titleHeight = 68;
+  const titleHeight = exportSettings.includePageTitles ? 68 : 0;
   const spineWidth = 28;
   const spineGap = 18;
   const gridWidth = grid.cols * slotWidth + (grid.cols - 1) * gapX;
@@ -4141,6 +4801,8 @@ async function renderSpreadToCanvas(pages) {
       spineGap,
       gridWidth,
       gridHeight,
+      includePageTitles: exportSettings.includePageTitles,
+      printNeededCardsGreyscale: exportSettings.printNeededCardsGreyscale,
     }, imageCache);
   }
 
@@ -4161,15 +4823,19 @@ async function drawPageToCanvas(ctx, page, pageX, pageY, metrics, imageCache) {
     spineWidth,
     spineGap,
     gridHeight,
+    includePageTitles,
+    printNeededCardsGreyscale,
   } = metrics;
   const pageNumber = getPageNumber(page);
   const spineOnRight = pageNumber > 1 && pageNumber % 2 === 0;
 
-  ctx.fillStyle = "#20242a";
-  ctx.font = "700 28px Arial, sans-serif";
-  ctx.textAlign = "center";
-  ctx.textBaseline = "middle";
-  wrapCanvasText(ctx, `Page ${pageNumber}: ${page.title || `Page ${pageNumber}`}`, pageX + pageWidth / 2, pageY + titleHeight / 2, pageWidth - 28, 32);
+  if (includePageTitles) {
+    ctx.fillStyle = "#20242a";
+    ctx.font = "700 28px Arial, sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    wrapCanvasText(ctx, `Page ${pageNumber}: ${page.title || `Page ${pageNumber}`}`, pageX + pageWidth / 2, pageY + titleHeight / 2, pageWidth - 28, 32);
+  }
 
   const sheetX = pageX;
   const sheetY = pageY + titleHeight;
@@ -4231,7 +4897,7 @@ async function drawPageToCanvas(ctx, page, pageX, pageY, metrics, imageCache) {
       fullBounds,
       visibleBounds,
       {
-        muted: entry.isCard && !isCardOwned(entry.image),
+        muted: entry.isCard && !isCardOwned(entry.image) && printNeededCardsGreyscale,
         rounded: entry.isCard && isCardOwned(entry.image),
       },
     );
