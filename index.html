@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Michi Binder Creator</title>
+    <link rel="stylesheet" href="styles.css" />
+    <script src="app.js" defer></script>
+  </head>
+  <body>
+    <div id="projectSetup" class="setup-overlay" hidden>
+      <form id="projectSetupForm" class="setup-card">
+        <h1>Create Binder Project</h1>
+        <label class="field">
+          <span>Project title</span>
+          <input id="setupProjectNameInput" type="text" autocomplete="off" placeholder="My Binder" />
+        </label>
+        <div class="inline-fields">
+          <label class="field">
+            <span>Rows</span>
+            <input id="setupRowsInput" type="number" min="1" max="8" step="1" value="3" />
+          </label>
+          <label class="field">
+            <span>Columns</span>
+            <input id="setupColsInput" type="number" min="1" max="8" step="1" value="3" />
+          </label>
+        </div>
+        <label class="check-field">
+          <input id="setupAutoSaveInput" type="checkbox" />
+          <span>Auto save local</span>
+        </label>
+        <button type="submit" class="wide primary">Create Project</button>
+      </form>
+    </div>
+
+    <div id="imageImportWizard" class="setup-overlay" hidden>
+      <form id="imageImportForm" class="setup-card import-card">
+        <h1>Import Image</h1>
+        <p id="imageImportCount" class="status"></p>
+        <img id="imageImportPreview" class="import-preview" alt="" />
+        <label class="field">
+          <span>Name</span>
+          <input id="imageImportNameInput" type="text" autocomplete="off" />
+        </label>
+        <button id="imageImportSaveButton" type="submit" class="wide primary">Import Image</button>
+        <div class="button-grid">
+          <button id="imageImportSkipButton" type="button">Skip</button>
+          <button id="imageImportCancelButton" type="button" class="danger">Cancel All</button>
+        </div>
+      </form>
+    </div>
+
+    <div id="cardInsertPrompt" class="setup-overlay" hidden>
+      <div class="setup-card insert-card">
+        <h1>Insert Card</h1>
+        <p id="cardInsertSlotText" class="status"></p>
+        <div id="cardInsertList" class="card-insert-list"></div>
+        <button id="cardInsertCancelButton" type="button" class="wide">Cancel</button>
+      </div>
+    </div>
+
+    <div id="projectMenuModal" class="setup-overlay" hidden>
+      <div class="setup-card menu-card">
+        <h1>Project Menu</h1>
+        <div class="menu-actions">
+          <button id="newProjectButton" type="button">New Project</button>
+          <button id="saveLocalButton" type="button">Save Local</button>
+          <button id="exportJsonButton" type="button">Export JSON</button>
+          <button id="importJsonButton" type="button">Import JSON</button>
+          <button id="deleteProjectButton" type="button" class="danger">Delete Project</button>
+        </div>
+        <label class="check-field menu-check">
+          <input id="menuAutoSaveInput" type="checkbox" />
+          <span>Enable autosave local</span>
+        </label>
+        <button id="projectMenuCloseButton" type="button" class="wide">Close</button>
+      </div>
+    </div>
+
+    <div class="app-shell">
+      <aside class="sidebar" aria-label="Binder controls">
+        <section class="panel">
+          <div class="panel-heading">
+            <h2>Project</h2>
+            <button id="projectMenuButton" type="button" class="small-action-button">Menu</button>
+          </div>
+          <label class="field">
+            <span>Name</span>
+            <input id="projectNameInput" type="text" autocomplete="off" />
+          </label>
+          <p id="projectBinderSummary" class="status"></p>
+          <p id="localSaveSummary" class="status"></p>
+          <input id="importJsonInput" type="file" accept="application/json,.json" hidden />
+          <p id="statusText" class="status" aria-live="polite"></p>
+        </section>
+
+        <section class="panel">
+          <div class="panel-heading">
+            <h2>Pages</h2>
+            <button id="newPageButton" type="button" class="small-action-button">New Page</button>
+          </div>
+          <div id="pageList" class="page-list"></div>
+        </section>
+
+        <section class="panel">
+          <h2>Placement</h2>
+          <label class="field">
+            <span>Span</span>
+            <select id="spanSelect">
+              <option value="1x1">1 column x 1 row</option>
+              <option value="1x2">1 column x 2 rows</option>
+              <option value="2x1">2 columns x 1 row</option>
+              <option value="2x2">2 columns x 2 rows</option>
+              <option value="3x1">3 columns x 1 row</option>
+              <option value="1x3">1 column x 3 rows</option>
+              <option value="custom">Custom</option>
+            </select>
+          </label>
+          <div class="inline-fields">
+            <label class="field">
+              <span>Width</span>
+              <input id="customSpanColsInput" type="number" min="1" max="8" step="1" />
+            </label>
+            <label class="field">
+              <span>Height</span>
+              <input id="customSpanRowsInput" type="number" min="1" max="8" step="1" />
+            </label>
+          </div>
+        </section>
+
+        <section class="panel">
+          <h2>Cards</h2>
+          <form id="cardSearchForm" class="search-row">
+            <input id="cardSearchInput" type="search" autocomplete="off" placeholder="Search TCGdex cards" />
+            <button id="cardSearchButton" type="submit">Search</button>
+          </form>
+          <p id="cardSearchStatus" class="status" aria-live="polite"></p>
+          <div id="cardSearchResults" class="card-results"></div>
+          <div id="cardLibrary" class="image-library"></div>
+        </section>
+
+        <section class="panel">
+          <h2>Images</h2>
+          <label class="file-button">
+            <input id="imageFileInput" type="file" accept="image/*" multiple />
+            <span>Add Images</span>
+          </label>
+          <div id="dropZone" class="drop-zone" tabindex="0">Drop or Paste Images</div>
+          <div id="imageLibrary" class="image-library"></div>
+        </section>
+
+        <section class="panel">
+          <h2>Selected Crop</h2>
+          <p id="selectedPlacementName" class="muted">No placement selected</p>
+          <label class="field">
+            <span>Zoom</span>
+            <input id="cropScaleInput" type="range" min="0.5" max="4" step="0.01" disabled />
+          </label>
+          <label class="field">
+            <span>X</span>
+            <input id="cropXInput" type="range" min="-100" max="100" step="1" disabled />
+          </label>
+          <label class="field">
+            <span>Y</span>
+            <input id="cropYInput" type="range" min="-100" max="100" step="1" disabled />
+          </label>
+          <label class="field">
+            <span>Rotate</span>
+            <select id="cropRotateInput" disabled>
+              <option value="0">0</option>
+              <option value="90">90</option>
+              <option value="180">180</option>
+              <option value="270">270</option>
+            </select>
+          </label>
+          <div class="button-grid">
+            <button id="resetCropButton" type="button" disabled>Reset</button>
+            <button id="deletePlacementButton" type="button" class="danger" disabled>Delete Item</button>
+          </div>
+        </section>
+      </aside>
+
+      <div id="sidebarResizer" class="sidebar-resizer" role="separator" aria-label="Resize sidebar" aria-orientation="vertical" tabindex="0"></div>
+
+      <main class="workspace" aria-label="Binder preview">
+        <div class="floating-view-control" aria-label="Binder view controls">
+          <div class="floating-title">View</div>
+          <label class="check-field">
+            <input id="fitToDisplayInput" type="checkbox" checked />
+            <span>Fit</span>
+          </label>
+          <label class="check-field">
+            <input id="centerBinderInput" type="checkbox" checked />
+            <span>Center</span>
+          </label>
+          <label class="field">
+            <span>Zoom</span>
+            <input id="binderZoomInput" type="range" min="5" max="200" step="1" value="100" disabled />
+          </label>
+          <button id="exportPngButton" type="button" class="wide primary compact-export-button">Export PNG</button>
+          <p id="binderZoomLabel" class="status"></p>
+        </div>
+        <div id="exportArea" class="preview-shell">
+          <div id="spreadCanvas" class="spread-canvas"></div>
+        </div>
+      </main>
+    </div>
+  </body>
+</html>
