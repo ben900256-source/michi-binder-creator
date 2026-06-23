@@ -11,15 +11,6 @@ const BINDER_ZOOM_MAX = 2;
 const SIDEBAR_WIDTH_MIN = 240;
 const SIDEBAR_WIDTH_MAX = 560;
 
-const SPAN_PRESETS = {
-  "1x1": { colSpan: 1, rowSpan: 1 },
-  "1x2": { colSpan: 1, rowSpan: 2 },
-  "2x1": { colSpan: 2, rowSpan: 1 },
-  "2x2": { colSpan: 2, rowSpan: 2 },
-  "3x1": { colSpan: 3, rowSpan: 1 },
-  "1x3": { colSpan: 1, rowSpan: 3 },
-};
-
 const DEFAULT_CROP = {
   scale: 1,
   x: 0,
@@ -45,6 +36,9 @@ const state = {
   placementClipboard: null,
   imagePlacementDraft: null,
   pendingImagePlacement: null,
+  imageNaturalSizes: new Map(),
+  imageNaturalSizeLoads: new Set(),
+  imagePlacementPanGesture: null,
   hoveredSlot: null,
   binderZoom: 1,
   fitToDisplay: true,
@@ -101,6 +95,7 @@ const els = {
   placementCropXInput: document.querySelector("#placementCropXInput"),
   placementCropYInput: document.querySelector("#placementCropYInput"),
   placementCropRotateInput: document.querySelector("#placementCropRotateInput"),
+  imagePlacementResetCropButton: document.querySelector("#imagePlacementResetCropButton"),
   imagePlacementCancelButton: document.querySelector("#imagePlacementCancelButton"),
   imagePlacementStartButton: document.querySelector("#imagePlacementStartButton"),
   projectMenuButton: document.querySelector("#projectMenuButton"),
@@ -121,19 +116,11 @@ const els = {
   binderZoomLabel: document.querySelector("#binderZoomLabel"),
   fitToDisplayInput: document.querySelector("#fitToDisplayInput"),
   centerBinderInput: document.querySelector("#centerBinderInput"),
-  spanSelect: document.querySelector("#spanSelect"),
-  customSpanColsInput: document.querySelector("#customSpanColsInput"),
-  customSpanRowsInput: document.querySelector("#customSpanRowsInput"),
+  placementColsInput: document.querySelector("#placementColsInput"),
+  placementRowsInput: document.querySelector("#placementRowsInput"),
   imageFileInput: document.querySelector("#imageFileInput"),
   dropZone: document.querySelector("#dropZone"),
   imageLibrary: document.querySelector("#imageLibrary"),
-  selectedPlacementName: document.querySelector("#selectedPlacementName"),
-  cropScaleInput: document.querySelector("#cropScaleInput"),
-  cropXInput: document.querySelector("#cropXInput"),
-  cropYInput: document.querySelector("#cropYInput"),
-  cropRotateInput: document.querySelector("#cropRotateInput"),
-  resetCropButton: document.querySelector("#resetCropButton"),
-  deletePlacementButton: document.querySelector("#deletePlacementButton"),
   appShell: document.querySelector(".app-shell"),
   sidebarResizer: document.querySelector("#sidebarResizer"),
   workspace: document.querySelector(".workspace"),
@@ -835,14 +822,12 @@ function bindEvents() {
 
   bindBinderPanZoom();
   bindSidebarResize();
+  bindImagePlacementPreviewControls();
 
-  els.spanSelect.addEventListener("change", () => {
+  els.placementColsInput.addEventListener("input", () => {
     updateImagePlacementDraftSpan();
   });
-  els.customSpanColsInput.addEventListener("change", () => {
-    updateImagePlacementDraftSpan();
-  });
-  els.customSpanRowsInput.addEventListener("change", () => {
+  els.placementRowsInput.addEventListener("input", () => {
     updateImagePlacementDraftSpan();
   });
 
@@ -858,6 +843,10 @@ function bindEvents() {
   els.placementCropRotateInput.addEventListener("change", () =>
     updateImagePlacementDraftCrop("rotate", els.placementCropRotateInput.value),
   );
+  els.imagePlacementResetCropButton.addEventListener("click", () => {
+    if (!state.imagePlacementDraft) return;
+    setImagePlacementDraftCrop(DEFAULT_CROP);
+  });
 
   els.imageFileInput.addEventListener("change", async () => {
     await importImageFiles(Array.from(els.imageFileInput.files || []));
@@ -887,21 +876,6 @@ function bindEvents() {
     event.preventDefault();
     await importImageFiles(files, "pasted-image");
   });
-
-  els.cropScaleInput.addEventListener("input", () => updateSelectedCrop("scale", els.cropScaleInput.value));
-  els.cropXInput.addEventListener("input", () => updateSelectedCrop("x", els.cropXInput.value));
-  els.cropYInput.addEventListener("input", () => updateSelectedCrop("y", els.cropYInput.value));
-  els.cropRotateInput.addEventListener("change", () => updateSelectedCrop("rotate", els.cropRotateInput.value));
-
-  els.resetCropButton.addEventListener("click", () => {
-    const placement = getSelectedPlacement();
-    if (!placement) return;
-    placement.crop = { ...DEFAULT_CROP };
-    saveProject("Crop reset");
-    renderAll();
-  });
-
-  els.deletePlacementButton.addEventListener("click", deleteSelectedPlacement);
 
   document.addEventListener("keydown", (event) => {
     const editingText = ["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement?.tagName);
@@ -977,12 +951,10 @@ function renderAll() {
   renderPageList();
   applySidebarWidth();
   renderBinderViewControls();
-  renderSpanControls();
   renderCardSearchControls();
   renderCardLibrary();
   renderImageLibrary();
   renderBinder();
-  renderCropControls();
   renderImagePlacementModal();
   renderImageImportWizard();
   renderCardInsertPrompt();
@@ -1146,6 +1118,73 @@ function bindSidebarResize() {
     const step = event.shiftKey ? 40 : 16;
     setSidebarWidth(state.sidebarWidth + (event.key === "ArrowRight" ? step : -step));
   });
+}
+
+function bindImagePlacementPreviewControls() {
+  const preview = els.imagePlacementPreview;
+
+  preview.addEventListener("pointerdown", (event) => {
+    if (!state.imagePlacementDraft || event.button !== 0) return;
+
+    const imageLayer = preview.querySelector(".placement-preview-image-layer");
+    if (!imageLayer) return;
+
+    const layerBounds = imageLayer.getBoundingClientRect();
+    if (!layerBounds.width || !layerBounds.height) return;
+
+    event.preventDefault();
+    preview.setPointerCapture(event.pointerId);
+    state.imagePlacementPanGesture = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      imageWidth: layerBounds.width,
+      imageHeight: layerBounds.height,
+      crop: normalizeCrop(state.imagePlacementDraft.crop),
+    };
+    preview.classList.add("panning");
+  });
+
+  preview.addEventListener("pointermove", (event) => {
+    const gesture = state.imagePlacementPanGesture;
+    if (!state.imagePlacementDraft || !gesture || gesture.pointerId !== event.pointerId) return;
+
+    event.preventDefault();
+    setImagePlacementDraftCrop({
+      ...gesture.crop,
+      x: gesture.crop.x + ((event.clientX - gesture.startX) / gesture.imageWidth) * 100,
+      y: gesture.crop.y + ((event.clientY - gesture.startY) / gesture.imageHeight) * 100,
+    });
+  });
+
+  const endPan = (event) => {
+    const gesture = state.imagePlacementPanGesture;
+    if (!gesture || gesture.pointerId !== event.pointerId) return;
+
+    if (preview.hasPointerCapture(event.pointerId)) {
+      preview.releasePointerCapture(event.pointerId);
+    }
+    state.imagePlacementPanGesture = null;
+    preview.classList.remove("panning");
+  };
+
+  preview.addEventListener("pointerup", endPan);
+  preview.addEventListener("pointercancel", endPan);
+  preview.addEventListener(
+    "wheel",
+    (event) => {
+      if (!state.imagePlacementDraft) return;
+
+      event.preventDefault();
+      const crop = normalizeCrop(state.imagePlacementDraft.crop);
+      const zoomFactor = Math.exp(-event.deltaY * 0.001);
+      setImagePlacementDraftCrop({
+        ...crop,
+        scale: clampNumber(crop.scale * zoomFactor, 0.5, 4, crop.scale),
+      });
+    },
+    { passive: false },
+  );
 }
 
 function renderBinderViewControls() {
@@ -1392,19 +1431,6 @@ function calculateFitBinderZoom() {
     BINDER_ZOOM_MAX,
     1,
   );
-}
-
-function renderSpanControls() {
-  const isCustom = els.spanSelect.value === "custom";
-  els.customSpanColsInput.disabled = !isCustom;
-  els.customSpanRowsInput.disabled = !isCustom;
-
-  if (!els.customSpanColsInput.value) {
-    els.customSpanColsInput.value = "1";
-  }
-  if (!els.customSpanRowsInput.value) {
-    els.customSpanRowsInput.value = "1";
-  }
 }
 
 function renderCardSearchControls() {
@@ -1755,17 +1781,7 @@ function openImagePlacementModal(imageId) {
     rowSpan: 1,
     crop: { ...DEFAULT_CROP },
   };
-  setSpanControlsFromDraft(state.imagePlacementDraft);
   renderAll();
-}
-
-function setSpanControlsFromDraft(draft) {
-  const preset = Object.entries(SPAN_PRESETS).find(
-    ([, span]) => span.colSpan === draft.colSpan && span.rowSpan === draft.rowSpan,
-  );
-  els.spanSelect.value = preset ? preset[0] : "custom";
-  els.customSpanColsInput.value = String(draft.colSpan);
-  els.customSpanRowsInput.value = String(draft.rowSpan);
 }
 
 function openPlacementEditModal(pageId, placementId) {
@@ -1786,7 +1802,6 @@ function openPlacementEditModal(pageId, placementId) {
     rowSpan: placement.rowSpan,
     crop: normalizeCrop(placement.crop),
   };
-  setSpanControlsFromDraft(state.imagePlacementDraft);
   renderAll();
 }
 
@@ -1797,30 +1812,55 @@ function closeImagePlacementModal() {
 
 function updateImagePlacementDraftSpan() {
   if (!state.imagePlacementDraft) {
-    renderSpanControls();
     return;
   }
 
-  const span = getSelectedSpan();
-  state.imagePlacementDraft.colSpan = span.colSpan;
-  state.imagePlacementDraft.rowSpan = span.rowSpan;
+  state.imagePlacementDraft.colSpan = clampInteger(els.placementColsInput.value, 1, 8, 1);
+  state.imagePlacementDraft.rowSpan = clampInteger(els.placementRowsInput.value, 1, 8, 1);
   renderImagePlacementModal();
+}
+
+function syncImagePlacementSpanControls() {
+  const draft = state.imagePlacementDraft;
+  els.placementColsInput.value = String(draft ? draft.colSpan : 1);
+  els.placementRowsInput.value = String(draft ? draft.rowSpan : 1);
 }
 
 function updateImagePlacementDraftCrop(key, value) {
   if (!state.imagePlacementDraft) return;
 
-  state.imagePlacementDraft.crop = normalizeCrop({
+  setImagePlacementDraftCrop({
     ...normalizeCrop(state.imagePlacementDraft.crop),
     [key]: key === "rotate" ? Number(value) : Number(value),
   });
-  renderImagePlacementModal();
+}
+
+function setImagePlacementDraftCrop(crop) {
+  if (!state.imagePlacementDraft) return;
+
+  state.imagePlacementDraft.crop = normalizeCrop(crop);
+  syncImagePlacementCropControls();
+  applyImagePlacementPreviewCrop();
+}
+
+function syncImagePlacementCropControls() {
+  const crop = normalizeCrop(state.imagePlacementDraft?.crop);
+  els.placementCropScaleInput.value = crop.scale;
+  els.placementCropXInput.value = crop.x;
+  els.placementCropYInput.value = crop.y;
+  els.placementCropRotateInput.value = crop.rotate;
+}
+
+function applyImagePlacementPreviewCrop() {
+  const img = els.imagePlacementPreview.querySelector(".placement-preview-image-layer img");
+  if (!img || !state.imagePlacementDraft) return;
+
+  img.style.transform = cropToTransform(state.imagePlacementDraft.crop);
 }
 
 function renderImagePlacementModal() {
   const draft = state.imagePlacementDraft;
   els.imagePlacementModal.hidden = !draft;
-  renderSpanControls();
   if (!draft) {
     els.imagePlacementPreview.replaceChildren();
     return;
@@ -1846,28 +1886,30 @@ function renderImagePlacementModal() {
   frame.style.setProperty("--preview-cols", draft.colSpan);
   frame.style.setProperty("--preview-rows", draft.rowSpan);
 
+  const imageLayer = document.createElement("div");
+  imageLayer.className = "placement-preview-image-layer";
+  const imageBox = getPlacementPreviewImageBox(image, previewMetrics.frameWidth, previewMetrics.frameHeight);
+  imageLayer.style.width = `${imageBox.width}px`;
+  imageLayer.style.height = `${imageBox.height}px`;
+
   const img = document.createElement("img");
   img.src = image.dataUrl;
   img.alt = image.name;
-  img.style.width = `${previewMetrics.frameWidth}px`;
-  img.style.height = `${previewMetrics.frameHeight}px`;
   img.style.transform = cropToTransform(draft.crop);
-  frame.append(img);
+  imageLayer.append(img);
+  frame.append(imageLayer);
   els.imagePlacementPreview.append(frame);
 
-  const crop = normalizeCrop(draft.crop);
-  els.placementCropScaleInput.value = crop.scale;
-  els.placementCropXInput.value = crop.x;
-  els.placementCropYInput.value = crop.y;
-  els.placementCropRotateInput.value = crop.rotate;
+  syncImagePlacementSpanControls();
+  syncImagePlacementCropControls();
 }
 
 function setImagePlacementPreviewSize(draft) {
   const ratio = (draft.colSpan * CARD_ASPECT) / draft.rowSpan;
-  const stageWidth = 380;
-  const stageHeight = 300;
-  const frameMaxWidth = stageWidth * 0.58;
-  const frameMaxHeight = stageHeight * 0.58;
+  const stageWidth = Math.round(Math.min(680, Math.max(380, window.innerWidth - 120)));
+  const stageHeight = Math.round(Math.min(460, Math.max(300, window.innerHeight * 0.48)));
+  const frameMaxWidth = stageWidth * 0.62;
+  const frameMaxHeight = stageHeight * 0.62;
   let frameWidth = frameMaxWidth;
   let frameHeight = frameWidth / ratio;
   if (frameHeight > frameMaxHeight) {
@@ -1881,6 +1923,78 @@ function setImagePlacementPreviewSize(draft) {
     frameWidth: Math.round(frameWidth),
     frameHeight: Math.round(frameHeight),
   };
+}
+
+function getPlacementPreviewImageBox(image, frameWidth, frameHeight) {
+  const frameRatio = frameWidth / frameHeight;
+  const scale = getCoverImageScale(getImageRatio(image, frameRatio), frameRatio);
+
+  return {
+    width: Math.round(frameWidth * scale.width),
+    height: Math.round(frameHeight * scale.height),
+  };
+}
+
+function getPlacementLayerPercentSize(image, frameRatio) {
+  const scale = getCoverImageScale(getImageRatio(image, frameRatio), frameRatio);
+  return {
+    width: scale.width * 100,
+    height: scale.height * 100,
+  };
+}
+
+function getCoverImageScale(imageRatio, frameRatio) {
+  if (!Number.isFinite(imageRatio) || imageRatio <= 0 || !Number.isFinite(frameRatio) || frameRatio <= 0) {
+    return { width: 1, height: 1 };
+  }
+
+  if (imageRatio > frameRatio) {
+    return { width: imageRatio / frameRatio, height: 1 };
+  }
+
+  return { width: 1, height: frameRatio / imageRatio };
+}
+
+function getImageRatio(image, fallbackRatio) {
+  const naturalSize = ensureImageNaturalSize(image);
+  return naturalSize ? naturalSize.width / naturalSize.height : fallbackRatio;
+}
+
+function ensureImageNaturalSize(image) {
+  if (!image?.id || !image.dataUrl) return null;
+
+  const cached = state.imageNaturalSizes.get(image.id);
+  if (cached) return cached;
+  if (state.imageNaturalSizeLoads.has(image.id)) return null;
+
+  state.imageNaturalSizeLoads.add(image.id);
+  const probe = new Image();
+  probe.addEventListener(
+    "load",
+    () => {
+      state.imageNaturalSizeLoads.delete(image.id);
+      if (probe.naturalWidth && probe.naturalHeight) {
+        state.imageNaturalSizes.set(image.id, {
+          width: probe.naturalWidth,
+          height: probe.naturalHeight,
+        });
+      }
+      if (state.imagePlacementDraft?.imageId === image.id) {
+        renderImagePlacementModal();
+      }
+      renderBinder();
+    },
+    { once: true },
+  );
+  probe.addEventListener(
+    "error",
+    () => {
+      state.imageNaturalSizeLoads.delete(image.id);
+    },
+    { once: true },
+  );
+  probe.src = image.dataUrl;
+  return null;
 }
 
 function startPendingImagePlacement() {
@@ -2225,11 +2339,19 @@ function createPagePreview(page, grid) {
     item.style.gridColumn = `${placement.col + 1} / span ${placement.colSpan}`;
     item.setAttribute("aria-label", `${image.name}, page ${pageNumber}, row ${placement.row + 1}, column ${placement.col + 1}`);
 
+    const imageLayer = document.createElement("span");
+    imageLayer.className = "placement-image-layer";
+    const frameRatio = (placement.colSpan * CARD_ASPECT) / placement.rowSpan;
+    const layerSize = getPlacementLayerPercentSize(image, frameRatio);
+    imageLayer.style.width = `${layerSize.width}%`;
+    imageLayer.style.height = `${layerSize.height}%`;
+
     const img = document.createElement("img");
     img.src = image.dataUrl;
     img.alt = image.name;
     img.style.transform = cropToTransform(placement.crop);
-    item.append(img);
+    imageLayer.append(img);
+    item.append(imageLayer);
 
     const badge = document.createElement("span");
     badge.className = "placement-badge";
@@ -2246,7 +2368,8 @@ function createPagePreview(page, grid) {
     if (!isCardPlacement) {
       const edit = document.createElement("span");
       edit.className = "placement-edit";
-      edit.textContent = "Edit";
+      edit.textContent = "✎";
+      edit.setAttribute("aria-label", "Edit placement");
       edit.title = "Edit placement";
       item.append(edit);
     }
@@ -2283,52 +2406,6 @@ function cropToTransform(crop) {
   const safeCrop = normalizeCrop(crop);
   // Crop edits are non-destructive: the original data URL stays intact and CSS clips the view.
   return `translate(${safeCrop.x}%, ${safeCrop.y}%) rotate(${safeCrop.rotate}deg) scale(${safeCrop.scale})`;
-}
-
-function renderCropControls() {
-  const placement = getSelectedPlacement();
-  const image = placement ? getImage(placement.imageId) : null;
-  const hasSelection = Boolean(placement && image);
-
-  els.selectedPlacementName.textContent = hasSelection
-    ? `${image.name} (${placement.colSpan}x${placement.rowSpan})`
-    : "No placement selected";
-
-  for (const control of [
-    els.cropScaleInput,
-    els.cropXInput,
-    els.cropYInput,
-    els.cropRotateInput,
-    els.resetCropButton,
-    els.deletePlacementButton,
-  ]) {
-    control.disabled = !hasSelection;
-  }
-
-  if (!hasSelection) {
-    els.cropScaleInput.value = DEFAULT_CROP.scale;
-    els.cropXInput.value = DEFAULT_CROP.x;
-    els.cropYInput.value = DEFAULT_CROP.y;
-    els.cropRotateInput.value = DEFAULT_CROP.rotate;
-    return;
-  }
-
-  const crop = normalizeCrop(placement.crop);
-  els.cropScaleInput.value = crop.scale;
-  els.cropXInput.value = crop.x;
-  els.cropYInput.value = crop.y;
-  els.cropRotateInput.value = crop.rotate;
-}
-
-function getSelectedSpan() {
-  if (els.spanSelect.value !== "custom") {
-    return SPAN_PRESETS[els.spanSelect.value] || SPAN_PRESETS["1x1"];
-  }
-
-  return {
-    colSpan: clampInteger(els.customSpanColsInput.value, 1, 8, 1),
-    rowSpan: clampInteger(els.customSpanRowsInput.value, 1, 8, 1),
-  };
 }
 
 function placePendingImage(pageId, row, col) {
@@ -2480,19 +2557,6 @@ function pastePlacementClipboard(pageId, row, col) {
   saveProject(`${clipboard.mode === "cut" ? "Moved" : "Pasted"} ${asset.name}`);
   renderAll();
   return true;
-}
-
-function updateSelectedCrop(key, value) {
-  const placement = getSelectedPlacement();
-  if (!placement) return;
-
-  const nextCrop = {
-    ...normalizeCrop(placement.crop),
-    [key]: key === "rotate" ? Number(value) : Number(value),
-  };
-  placement.crop = normalizeCrop(nextCrop);
-  saveProject();
-  renderBinder();
 }
 
 function getAssetKind(asset) {
@@ -2880,7 +2944,7 @@ function drawPlacement(ctx, image, crop, x, y, width, height) {
     drawHeight = width / imageRatio;
   }
 
-  ctx.translate(x + width / 2 + (safeCrop.x / 100) * width, y + height / 2 + (safeCrop.y / 100) * height);
+  ctx.translate(x + width / 2 + (safeCrop.x / 100) * drawWidth, y + height / 2 + (safeCrop.y / 100) * drawHeight);
   ctx.rotate((safeCrop.rotate * Math.PI) / 180);
   ctx.scale(safeCrop.scale, safeCrop.scale);
   ctx.drawImage(image, -drawWidth / 2, -drawHeight / 2, drawWidth, drawHeight);
