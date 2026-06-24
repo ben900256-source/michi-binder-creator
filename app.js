@@ -549,6 +549,18 @@ function getSpreadStartIndex(index = getCurrentPageIndex()) {
   return index % 2 === 1 ? index : index - 1;
 }
 
+function getSpreadStartIndices(pageCount = state.project.pages.length) {
+  if (pageCount <= 0) {
+    return [];
+  }
+
+  const indices = [0];
+  for (let index = 1; index < pageCount; index += 2) {
+    indices.push(index);
+  }
+  return indices;
+}
+
 function getCurrentSpreadPages() {
   const startIndex = getSpreadStartIndex();
   const count = startIndex === 0 ? 1 : 2;
@@ -599,15 +611,18 @@ function selectPage(pageId, message = "Page selected") {
   return true;
 }
 
-function cycleCurrentPage(direction) {
+function cycleCurrentSpread(direction) {
   const pages = state.project.pages;
-  if (pages.length < 2) {
+  const spreadStartIndices = getSpreadStartIndices(pages.length);
+  if (spreadStartIndices.length < 2) {
     return false;
   }
 
-  const currentIndex = getCurrentPageIndex();
-  const nextIndex = (currentIndex + direction + pages.length) % pages.length;
-  return selectPage(pages[nextIndex].id);
+  const currentSpreadStart = getSpreadStartIndex();
+  const currentSpreadIndex = Math.max(0, spreadStartIndices.indexOf(currentSpreadStart));
+  const nextSpreadIndex = (currentSpreadIndex + direction + spreadStartIndices.length) % spreadStartIndices.length;
+  const nextPage = pages[spreadStartIndices[nextSpreadIndex]];
+  return selectPage(nextPage?.id, "Spread selected");
 }
 
 function addPage() {
@@ -2819,7 +2834,7 @@ function bindEvents() {
       (event.key === "ArrowLeft" || event.key === "ArrowRight")
     ) {
       event.preventDefault();
-      cycleCurrentPage(event.key === "ArrowRight" ? 1 : -1);
+      cycleCurrentSpread(event.key === "ArrowRight" ? 1 : -1);
       return;
     }
 
