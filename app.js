@@ -7,6 +7,7 @@ const INDEXED_DB_CURRENT_PROJECT_ID = "current";
 const SIDEBAR_WIDTH_KEY = "michiBinderCreator.sidebarWidth.v1";
 const EXPORT_SETTINGS_KEY = "michiBinderCreator.exportSettings.v1";
 const MOBILE_WARNING_DISMISSED_KEY = "michiBinderCreator.mobileWarningDismissed.v1";
+const LOCAL_PROJECT_HINT_KEY = "michiBinderCreator.hasLocalProject.v1";
 const LOCAL_STORAGE_PROJECT_MAX_CHARS = 4_500_000;
 const STORAGE_DIAGNOSTICS_ENABLED = false;
 const BINDER_ZOOM_MIN = 0.05;
@@ -64,17 +65,19 @@ const DEFAULT_EXPORT_SETTINGS = {
   },
 };
 
-// One project object drives the whole app and is serialized directly to localStorage/JSON.
+// One project object drives the app. Large project data is loaded asynchronously from IndexedDB.
 const state = {
-  project: loadProject(),
-  currentPageId: localStorage.getItem(CURRENT_PAGE_KEY),
-  lastModifiedPageId: localStorage.getItem(CURRENT_PAGE_KEY),
+  project: createDefaultProject(),
+  startupPhase: "loading",
+  startupError: null,
+  currentPageId: getLocalStorageItem(CURRENT_PAGE_KEY),
+  lastModifiedPageId: getLocalStorageItem(CURRENT_PAGE_KEY),
   lastPlacedAssetId: null,
   selectedImageId: null,
   selectedCardId: null,
   selectedPlacementId: null,
   setupInitialized: false,
-  projectSetupRequested: false,
+  projectSetupRequested: !hasStoredProjectHint(),
   cardSearchResults: [],
   cardSearchLoading: false,
   cardSearchQuery: "",
@@ -85,6 +88,7 @@ const state = {
   cardInsertSearchQuery: "",
   cardInsertSearchPage: 0,
   cardInsertSearchHasMore: false,
+  pageSearchQuery: "",
   imageSearchQuery: "",
   imageImportItems: [],
   imageImportIndex: 0,
@@ -104,16 +108,25 @@ const state = {
   fitToDisplay: true,
   centerBinder: true,
   exportSettings: loadExportSettings(),
-  sidebarWidth: clampInteger(localStorage.getItem(SIDEBAR_WIDTH_KEY), SIDEBAR_WIDTH_MIN, SIDEBAR_WIDTH_MAX, 320),
+  sidebarWidth: clampInteger(getLocalStorageItem(SIDEBAR_WIDTH_KEY), SIDEBAR_WIDTH_MIN, SIDEBAR_WIDTH_MAX, 320),
   sidebarResizeGesture: null,
   binderPanX: 0,
   binderPanY: 0,
   binderPointers: new Map(),
   binderGesture: null,
   suppressNextBinderClick: false,
+  renderFrameId: null,
+  pendingRenderRegions: new Set(),
+  binderMeasureFrameId: null,
   indexedDbSavedAt: null,
   indexedDbSavePending: false,
-  indexedDbAutoSaveTimer: null,
+  indexedDbSaveInFlight: false,
+  indexedDbSavePromise: null,
+  indexedDbSaveRequest: null,
+  projectPersistenceToken: 0,
+  projectRevision: 0,
+  savedRevision: 0,
+  legacyLocalStorageProjectPending: false,
   indexedDbLastError: null,
   tcgdexCardStorageSlimmingPending: false,
   projectHistory: {
@@ -233,6 +246,7 @@ const els = {
   exportPngButton: document.querySelector("#exportPngButton"),
   exportPdfButton: document.querySelector("#exportPdfButton"),
   statusText: document.querySelector("#statusText"),
+  pageSearchInput: document.querySelector("#pageSearchInput"),
   pageList: document.querySelector("#pageList"),
   binderZoomInput: document.querySelector("#binderZoomInput"),
   binderZoomLabel: document.querySelector("#binderZoomLabel"),
@@ -251,14 +265,44 @@ const els = {
   spreadCanvas: document.querySelector("#spreadCanvas"),
 };
 
-ensureCurrentPage();
-state.lastPlacedAssetId = getInferredLastPlacedAssetId(state.project, state.lastModifiedPageId || state.currentPageId);
-resetProjectHistory();
-bindEvents();
-renderAll();
-showMobileWarningIfNeeded();
-hydrateProjectFromIndexedDbIfNeeded();
-queueTcgdexCardStorageSlimming();
+void bootApp();
+
+async function bootApp() {
+  ensureCurrentPage();
+  state.lastPlacedAssetId = getInferredLastPlacedAssetId(state.project, state.lastModifiedPageId || state.currentPageId);
+  resetProjectHistory();
+  bindEvents();
+  renderAll();
+  showMobileWarningIfNeeded();
+  setStatus(state.projectSetupRequested ? "New project ready" : "Loading local project...");
+
+  let hydrated = false;
+  try {
+    hydrated = await hydrateProjectFromIndexedDbIfNeeded();
+    state.startupPhase = "ready";
+    state.startupError = null;
+  } catch (error) {
+    console.error("Could not finish project startup.", error);
+    state.startupPhase = "error";
+    state.startupError = error;
+    state.indexedDbLastError = error;
+    hydrated = false;
+  }
+
+  if (!hydrated && !state.project.setupComplete) {
+    state.projectSetupRequested = true;
+    resetProjectHistory();
+  }
+  ensureCurrentPage();
+  saveProjectMetadataToLocalStorage();
+  scheduleRender("all");
+  queueTcgdexCardStorageSlimming();
+  if (state.startupPhase === "error") {
+    setStatus("Local project load failed");
+  } else {
+    setStatus(hydrated ? "Loaded local project" : "New project ready");
+  }
+}
 
 function createId() {
   if (window.crypto?.randomUUID) {
@@ -291,22 +335,31 @@ function createDefaultProject({ setupComplete = false } = {}) {
   };
 }
 
-function loadProject() {
-  const saved = localStorage.getItem(STORAGE_KEY);
+function loadLegacyLocalStorageProject() {
+  const saved = getLocalStorageItem(STORAGE_KEY);
   if (!saved) {
-    return createDefaultProject();
+    return null;
   }
 
   try {
     return normalizeProject(JSON.parse(saved));
   } catch (error) {
     console.warn("Could not load saved binder project.", error);
-    return createDefaultProject();
+    return null;
   }
 }
 
-function hasLocalStorageProject() {
-  return Boolean(localStorage.getItem(STORAGE_KEY));
+function getLocalStorageItem(key) {
+  try {
+    return localStorage.getItem(key);
+  } catch (error) {
+    console.warn(`Could not read localStorage item "${key}".`, error);
+    return null;
+  }
+}
+
+function hasStoredProjectHint() {
+  return getLocalStorageItem(LOCAL_PROJECT_HINT_KEY) === "1";
 }
 
 function loadExportSettings() {
@@ -513,7 +566,11 @@ function ensureCurrentPage() {
     state.currentPageId = state.project.pages[0].id;
   }
 
-  localStorage.setItem(CURRENT_PAGE_KEY, state.currentPageId);
+  try {
+    localStorage.setItem(CURRENT_PAGE_KEY, state.currentPageId);
+  } catch (error) {
+    console.warn("Could not save current page metadata.", error);
+  }
 }
 
 function getProjectGrid() {
@@ -683,11 +740,6 @@ function renamePage(pageId) {
 }
 
 function resetTransientProjectState() {
-  if (state.indexedDbAutoSaveTimer) {
-    window.clearTimeout(state.indexedDbAutoSaveTimer);
-    state.indexedDbAutoSaveTimer = null;
-  }
-
   state.selectedImageId = null;
   state.selectedCardId = null;
   state.selectedPlacementId = null;
@@ -723,9 +775,19 @@ function resetTransientProjectState() {
   state.binderPointers.clear();
   state.binderGesture = null;
   state.suppressNextBinderClick = false;
-  state.indexedDbSavedAt = null;
-  state.indexedDbSavePending = false;
   state.tcgdexCardStorageSlimmingPending = false;
+}
+
+function resetProjectPersistenceState({ savedAt = null } = {}) {
+  state.projectPersistenceToken += 1;
+  state.projectRevision = 0;
+  state.savedRevision = 0;
+  state.indexedDbSavePending = false;
+  state.indexedDbSaveInFlight = false;
+  state.indexedDbSavePromise = null;
+  state.indexedDbSaveRequest = null;
+  state.indexedDbSavedAt = savedAt;
+  state.indexedDbLastError = null;
 }
 
 function ensureProjectId(project = state.project) {
@@ -745,6 +807,7 @@ function startNewProject({ confirm = true } = {}) {
   state.lastModifiedPageId = state.currentPageId;
   state.lastPlacedAssetId = null;
   resetTransientProjectState();
+  resetProjectPersistenceState();
   state.projectSetupRequested = true;
   saveProject("New project ready", { resetHistory: true });
   renderAll();
@@ -775,6 +838,7 @@ async function deleteProject() {
   state.lastModifiedPageId = state.currentPageId;
   state.lastPlacedAssetId = null;
   resetTransientProjectState();
+  resetProjectPersistenceState();
   saveProject(localDeleteFailed ? "Project deleted; local save delete failed" : "Project deleted", {
     resetHistory: true,
   });
@@ -956,7 +1020,8 @@ function restoreProjectHistoryRecord(record, message) {
       ? record.lastPlacedAssetId
       : getInferredLastPlacedAssetId(restoredProject, state.lastModifiedPageId);
     clearProjectHistoryTransientState();
-    saveProjectToLocalStorageBestEffort();
+    markProjectChanged();
+    saveProjectMetadataToLocalStorage();
     queueIndexedDbAutoSave();
     setStatus(message);
     renderAll();
@@ -1005,34 +1070,47 @@ function saveProject(message = "Saved", options = {}) {
   } else {
     recordProjectHistoryForSave({ coalesceKey: options.coalesceKey });
   }
-  saveProjectToLocalStorageBestEffort();
+  markProjectChanged();
+  saveProjectMetadataToLocalStorage();
   setStatus(message);
   queueIndexedDbAutoSave();
   renderProjectHistoryControls();
 }
 
-function saveProjectToLocalStorageBestEffort() {
+function markProjectChanged() {
+  state.projectRevision += 1;
+  state.project.localAutoSave = true;
+}
+
+function saveProjectMetadataToLocalStorage() {
   try {
     ensureProjectId();
-    if (!canMirrorProjectToLocalStorage(state.project)) {
-      localStorage.removeItem(STORAGE_KEY);
-      localStorage.setItem(CURRENT_PAGE_KEY, state.currentPageId);
-      return false;
+    if (!state.legacyLocalStorageProjectPending) {
+      removeLegacyLocalStorageProject();
     }
-
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(state.project));
-    localStorage.setItem(CURRENT_PAGE_KEY, state.currentPageId);
+    if (state.currentPageId) {
+      localStorage.setItem(CURRENT_PAGE_KEY, state.currentPageId);
+    } else {
+      localStorage.removeItem(CURRENT_PAGE_KEY);
+    }
+    if (state.project.setupComplete) {
+      localStorage.setItem(LOCAL_PROJECT_HINT_KEY, "1");
+    } else {
+      localStorage.removeItem(LOCAL_PROJECT_HINT_KEY);
+    }
     return true;
   } catch (error) {
-    console.warn("Could not save project to localStorage.", error);
-    localStorage.removeItem(STORAGE_KEY);
-    localStorage.setItem(CURRENT_PAGE_KEY, state.currentPageId);
+    console.warn("Could not save project metadata to localStorage.", error);
     return false;
   }
 }
 
-function canMirrorProjectToLocalStorage(project) {
-  return getProjectEmbeddedDataUrlChars(project) < LOCAL_STORAGE_PROJECT_MAX_CHARS;
+function removeLegacyLocalStorageProject() {
+  try {
+    localStorage.removeItem(STORAGE_KEY);
+  } catch (error) {
+    console.warn("Could not remove legacy localStorage project.", error);
+  }
 }
 
 function getProjectEmbeddedDataUrlChars(project) {
@@ -1346,7 +1424,6 @@ function saveProjectSettings() {
   state.project.localAutoSave = true;
   closeProjectSettingsModal();
   saveProject("Project settings updated");
-  saveProjectToIndexedDb("Project settings updated");
   renderAll();
 }
 
@@ -1427,7 +1504,8 @@ async function slimTcgdexCardStorage() {
     }
 
     if (changed) {
-      saveProjectToLocalStorageBestEffort();
+      markProjectChanged();
+      saveProjectMetadataToLocalStorage();
       queueIndexedDbAutoSave();
       resetProjectHistory();
       renderAll();
@@ -1742,9 +1820,9 @@ async function loadLocalProject(projectId) {
       ? loadedLastPlacedAssetId
       : getInferredLastPlacedAssetId(state.project, state.lastModifiedPageId);
     resetTransientProjectState();
-    state.indexedDbSavedAt = record.savedAt || null;
+    resetProjectPersistenceState({ savedAt: record.savedAt || null });
     resetProjectHistory();
-    saveProjectToLocalStorageBestEffort();
+    saveProjectMetadataToLocalStorage();
     await putIndexedDbRecord(db, {
       id: INDEXED_DB_CURRENT_PROJECT_ID,
       currentProjectId: ensureProjectId(),
@@ -1792,28 +1870,29 @@ function openProjectDatabase() {
   });
 }
 
-async function saveProjectToIndexedDb(message = "Saved local", { quiet = false, reason = "autosave" } = {}) {
-  if (state.indexedDbAutoSaveTimer) {
-    window.clearTimeout(state.indexedDbAutoSaveTimer);
-    state.indexedDbAutoSaveTimer = null;
+async function saveProjectToIndexedDb(
+  message = "Saved local",
+  { quiet = false, reason = "autosave", managePending = true, persistenceToken = state.projectPersistenceToken } = {},
+) {
+  if (managePending) {
+    state.indexedDbSavePending = true;
+    scheduleRender("project");
   }
-
-  state.indexedDbSavePending = true;
-  renderProjectControls();
   let db = null;
   const savedAt = new Date().toISOString();
-  const projectId = ensureProjectId();
-  const projectCopy = JSON.parse(JSON.stringify(state.project));
-  projectCopy.id = projectId;
+  const projectToSave = state.project;
+  const projectId = ensureProjectId(projectToSave);
+  const currentPageId = state.currentPageId;
+  const lastModifiedPageId = state.lastModifiedPageId || state.currentPageId;
   const shouldLogDiagnostics = STORAGE_DIAGNOSTICS_ENABLED && (!quiet || reason === "json-import");
-  const projectJson = shouldLogDiagnostics ? JSON.stringify(projectCopy) : "";
+  const projectJson = shouldLogDiagnostics ? JSON.stringify(projectToSave) : "";
   const lastPlacedAssetId = getImage(state.lastPlacedAssetId)
     ? state.lastPlacedAssetId
     : getInferredLastPlacedAssetId(state.project, state.lastModifiedPageId);
 
   try {
     if (shouldLogDiagnostics) {
-      await logProjectStorageDiagnostics("IndexedDB save requested", projectCopy, {
+      await logProjectStorageDiagnostics("IndexedDB save requested", projectToSave, {
         message,
         reason,
         savedAt,
@@ -1821,14 +1900,23 @@ async function saveProjectToIndexedDb(message = "Saved local", { quiet = false, 
       });
     }
     db = await openProjectDatabase();
-    await putProjectIndexedDbRecords(db, projectCopy, savedAt, lastPlacedAssetId);
+    if (persistenceToken !== state.projectPersistenceToken) {
+      return false;
+    }
+    await putProjectIndexedDbRecords(db, projectToSave, {
+      savedAt,
+      currentPageId,
+      lastModifiedPageId,
+      lastPlacedAssetId,
+      persistenceToken,
+    });
     state.indexedDbSavedAt = savedAt;
     state.indexedDbLastError = null;
     if (!quiet) {
       setStatus(message);
     }
     if (shouldLogDiagnostics) {
-      await logProjectStorageDiagnostics("IndexedDB save succeeded", projectCopy, {
+      await logProjectStorageDiagnostics("IndexedDB save succeeded", projectToSave, {
         message,
         reason,
         savedAt,
@@ -1839,7 +1927,7 @@ async function saveProjectToIndexedDb(message = "Saved local", { quiet = false, 
   } catch (error) {
     console.error("Could not save project to IndexedDB.", error);
     state.indexedDbLastError = error;
-    await logProjectStorageDiagnostics("IndexedDB save failed", projectCopy, {
+    await logProjectStorageDiagnostics("IndexedDB save failed", projectToSave, {
       message,
       reason,
       savedAt,
@@ -1850,25 +1938,34 @@ async function saveProjectToIndexedDb(message = "Saved local", { quiet = false, 
     return false;
   } finally {
     db?.close();
-    state.indexedDbSavePending = false;
-    renderProjectControls();
+    if (managePending) {
+      state.indexedDbSavePending = false;
+      scheduleRender("project");
+    }
   }
 }
 
-async function putProjectIndexedDbRecords(db, projectCopy, savedAt, lastPlacedAssetId) {
+async function putProjectIndexedDbRecords(
+  db,
+  projectCopy,
+  { savedAt, currentPageId, lastModifiedPageId, lastPlacedAssetId, persistenceToken = state.projectPersistenceToken },
+) {
   await putIndexedDbRecord(
     db,
     {
       id: projectCopy.id,
       name: projectCopy.name || "Untitled Binder",
       savedAt,
-      currentPageId: state.currentPageId,
-      lastModifiedPageId: state.lastModifiedPageId || state.currentPageId,
+      currentPageId,
+      lastModifiedPageId,
       lastPlacedAssetId,
       project: projectCopy,
     },
     { label: "project", savedAt },
   );
+  if (persistenceToken !== state.projectPersistenceToken) {
+    return;
+  }
   await putIndexedDbRecord(
     db,
     {
@@ -2257,15 +2354,70 @@ function getIndexedDbRecordDiagnostics(record, context = {}) {
   };
 }
 
-function queueIndexedDbAutoSave() {
+function queueIndexedDbAutoSave(message = "Auto saved local", options = {}) {
   state.project.localAutoSave = true;
-  if (state.indexedDbAutoSaveTimer) {
-    window.clearTimeout(state.indexedDbAutoSaveTimer);
+  state.indexedDbSaveRequest = {
+    message,
+    options: {
+      quiet: true,
+      reason: "autosave",
+      ...options,
+    },
+  };
+  void flushIndexedDbSaveQueue();
+}
+
+async function flushIndexedDbSaveQueue() {
+  if (state.indexedDbSaveInFlight) {
+    return state.indexedDbSavePromise;
   }
-  state.indexedDbAutoSaveTimer = window.setTimeout(() => {
-    state.indexedDbAutoSaveTimer = null;
-    saveProjectToIndexedDb("Auto saved local", { quiet: true });
-  }, 350);
+
+  state.indexedDbSaveInFlight = true;
+  state.indexedDbSavePending = true;
+  scheduleRender("project");
+  const persistenceToken = state.projectPersistenceToken;
+
+  state.indexedDbSavePromise = (async () => {
+    let latestResult = true;
+    try {
+      while (
+        persistenceToken === state.projectPersistenceToken &&
+        state.savedRevision < state.projectRevision
+      ) {
+        const revisionToSave = state.projectRevision;
+        const request = state.indexedDbSaveRequest || {
+          message: "Auto saved local",
+          options: { quiet: true, reason: "autosave" },
+        };
+        state.indexedDbSaveRequest = null;
+        latestResult = await saveProjectToIndexedDb(request.message, {
+          ...request.options,
+          managePending: false,
+          persistenceToken,
+        });
+        if (!latestResult || persistenceToken !== state.projectPersistenceToken) {
+          return latestResult;
+        }
+
+        state.savedRevision = Math.max(state.savedRevision, revisionToSave);
+        if (state.legacyLocalStorageProjectPending) {
+          state.legacyLocalStorageProjectPending = false;
+          removeLegacyLocalStorageProject();
+        }
+        saveProjectMetadataToLocalStorage();
+      }
+      return latestResult;
+    } finally {
+      if (persistenceToken === state.projectPersistenceToken) {
+        state.indexedDbSaveInFlight = false;
+        state.indexedDbSavePending = false;
+        state.indexedDbSavePromise = null;
+        scheduleRender("project");
+      }
+    }
+  })();
+
+  return state.indexedDbSavePromise;
 }
 
 function putIndexedDbRecord(db, record, context = {}) {
@@ -2297,40 +2449,81 @@ function putIndexedDbRecord(db, record, context = {}) {
 }
 
 async function hydrateProjectFromIndexedDbIfNeeded() {
-  const shouldRecoverCurrentProject = !hasLocalStorageProject() || !state.project.setupComplete;
   await logStartupStorageDiagnostics("hydrate begin", {
-    shouldRecoverCurrentProject,
     stateProjectId: state.project.id,
     stateProjectSetupComplete: state.project.setupComplete === true,
     stateCurrentPageId: state.currentPageId,
   });
 
+  let indexedDbError = null;
   try {
-    if (shouldRecoverCurrentProject) {
-      const recovered = await loadCurrentIndexedDbProject();
-      await logStartupStorageDiagnostics(recovered ? "current project recovered" : "no current project to recover", {
-        shouldRecoverCurrentProject,
+    const recovered = await loadCurrentIndexedDbProject();
+    if (recovered) {
+      await logStartupStorageDiagnostics("current project recovered", {
         recovered,
         stateProjectId: state.project.id,
-      stateProjectSetupComplete: state.project.setupComplete === true,
-    });
-    if (recovered) {
-      renderAll();
-      queueTcgdexCardStorageSlimming();
-      return;
+        stateProjectSetupComplete: state.project.setupComplete === true,
+      });
+      return true;
     }
-  }
   } catch (error) {
+    indexedDbError = error;
     console.error("Could not load IndexedDB project.", error);
     await logStartupStorageDiagnostics("hydrate failed", {
-      shouldRecoverCurrentProject,
       error,
       stateProjectId: state.project.id,
       stateProjectSetupComplete: state.project.setupComplete === true,
     });
     state.indexedDbLastError = error;
-    renderProjectControls();
+    scheduleRender("project");
   }
+
+  const legacyRecovered = await loadLegacyLocalStorageProjectIntoState({ indexedDbError });
+  await logStartupStorageDiagnostics(
+    legacyRecovered ? "legacy localStorage project recovered" : "no project to recover",
+    {
+      legacyRecovered,
+      indexedDbError,
+      stateProjectId: state.project.id,
+      stateProjectSetupComplete: state.project.setupComplete === true,
+    },
+  );
+  return legacyRecovered;
+}
+
+async function loadLegacyLocalStorageProjectIntoState({ indexedDbError = null } = {}) {
+  const project = loadLegacyLocalStorageProject();
+  if (!project) {
+    return false;
+  }
+
+  state.project = project;
+  const currentPageId = getLocalStorageItem(CURRENT_PAGE_KEY);
+  state.currentPageId = state.project.pages.some((page) => page.id === currentPageId)
+    ? currentPageId
+    : state.project.pages[0]?.id || null;
+  state.lastModifiedPageId = state.currentPageId;
+  state.lastPlacedAssetId = getInferredLastPlacedAssetId(state.project, state.lastModifiedPageId);
+  resetTransientProjectState();
+  resetProjectPersistenceState();
+  state.legacyLocalStorageProjectPending = true;
+  if (indexedDbError) {
+    state.indexedDbLastError = indexedDbError;
+  }
+  resetProjectHistory();
+  markProjectChanged();
+
+  const persisted = await saveProjectToIndexedDb("Imported legacy local project", {
+    quiet: true,
+    reason: "legacy-localStorage-import",
+  });
+  if (persisted) {
+    state.savedRevision = state.projectRevision;
+    state.legacyLocalStorageProjectPending = false;
+    removeLegacyLocalStorageProject();
+    saveProjectMetadataToLocalStorage();
+  }
+  return true;
 }
 
 async function loadCurrentIndexedDbProject(records = state.localProjectChoices) {
@@ -2359,10 +2552,9 @@ async function loadCurrentIndexedDbProject(records = state.localProjectChoices) 
       ? loadedLastPlacedAssetId
       : getInferredLastPlacedAssetId(state.project, state.lastModifiedPageId);
     resetTransientProjectState();
-    state.indexedDbSavedAt = record.savedAt || currentRecord?.savedAt || null;
-    state.indexedDbLastError = null;
+    resetProjectPersistenceState({ savedAt: record.savedAt || currentRecord?.savedAt || null });
     resetProjectHistory();
-    saveProjectToLocalStorageBestEffort();
+    saveProjectMetadataToLocalStorage();
     return true;
   } finally {
     db.close();
@@ -2749,6 +2941,10 @@ function bindEvents() {
     closeParentDetails(event.currentTarget);
     addPage();
   });
+  els.pageSearchInput.addEventListener("input", () => {
+    state.pageSearchQuery = els.pageSearchInput.value.trim().toLowerCase();
+    renderPageList();
+  });
 
   els.exportJsonButton.addEventListener("click", (event) => {
     closeProjectMenuModal();
@@ -3022,20 +3218,66 @@ function bindEvents() {
   });
 }
 
+function scheduleRender(...regions) {
+  const requestedRegions = regions.flat().filter(Boolean);
+  if (!requestedRegions.length || requestedRegions.includes("all")) {
+    state.pendingRenderRegions.clear();
+    state.pendingRenderRegions.add("all");
+  } else if (!state.pendingRenderRegions.has("all")) {
+    requestedRegions.forEach((region) => state.pendingRenderRegions.add(region));
+  }
+
+  if (state.renderFrameId !== null) {
+    return;
+  }
+
+  state.renderFrameId = window.requestAnimationFrame(() => {
+    state.renderFrameId = null;
+    const pendingRegions = new Set(state.pendingRenderRegions);
+    state.pendingRenderRegions.clear();
+    renderRegions(pendingRegions);
+  });
+}
+
 function renderAll() {
+  renderRegions(new Set(["all"]));
+}
+
+function renderRegions(regions) {
+  const renderEverything = regions.has("all");
   ensureCurrentPage();
-  renderSetupControls();
-  renderProjectControls();
-  renderPageList();
-  applySidebarWidth();
-  renderBinderViewControls();
-  renderCardSearchControls();
-  renderCardLibrary();
-  renderImageLibrary();
-  renderBinder();
-  renderImagePlacementModal();
-  renderImageImportWizard();
-  renderCardInsertPrompt();
+  if (renderEverything || regions.has("setup")) {
+    renderSetupControls();
+  }
+  if (renderEverything || regions.has("project")) {
+    renderProjectControls();
+  }
+  if (renderEverything || regions.has("pages")) {
+    renderPageList();
+  }
+  if (renderEverything || regions.has("sidebar")) {
+    applySidebarWidth();
+  }
+  if (renderEverything || regions.has("binderControls")) {
+    renderBinderViewControls();
+  }
+  if (renderEverything || regions.has("cardSearch")) {
+    renderCardSearchControls();
+  }
+  if (renderEverything || regions.has("cardLibrary")) {
+    renderCardLibrary();
+  }
+  if (renderEverything || regions.has("imageLibrary")) {
+    renderImageLibrary();
+  }
+  if (renderEverything || regions.has("binder")) {
+    renderBinder();
+  }
+  if (renderEverything || regions.has("modals")) {
+    renderImagePlacementModal();
+    renderImageImportWizard();
+    renderCardInsertPrompt();
+  }
 }
 
 function renderProjectControls() {
@@ -3074,6 +3316,10 @@ function renderSetupControls() {
 }
 
 function getLocalSaveSummary() {
+  if (state.startupPhase === "loading") {
+    return "Local save: loading project...";
+  }
+
   if (state.indexedDbSavePending) {
     return "Local save: saving...";
   }
@@ -3094,8 +3340,26 @@ function getLocalSaveSummary() {
 
 function renderPageList() {
   els.pageList.replaceChildren();
+  if (document.activeElement !== els.pageSearchInput) {
+    els.pageSearchInput.value = state.pageSearchQuery;
+  }
 
-  state.project.pages.forEach((page, index) => {
+  const query = state.pageSearchQuery.trim().toLowerCase();
+  const pages = query
+    ? state.project.pages
+        .map((page, index) => ({ page, index }))
+        .filter(({ page, index }) => getPageSearchText(page, index).includes(query))
+    : state.project.pages.map((page, index) => ({ page, index }));
+
+  if (!pages.length) {
+    const empty = document.createElement("div");
+    empty.className = "empty-state page-list-empty";
+    empty.textContent = "No matching pages";
+    els.pageList.append(empty);
+    return;
+  }
+
+  pages.forEach(({ page, index }) => {
     const row = document.createElement("div");
     row.className = "page-row";
 
@@ -3132,6 +3396,19 @@ function renderPageList() {
     row.append(button, editButton, deleteButton);
     els.pageList.append(row);
   });
+}
+
+function getPageSearchText(page, index) {
+  const pageNumber = index + 1;
+  const title = page.title || `Page ${pageNumber}`;
+  return [
+    title,
+    `page ${pageNumber}`,
+    String(pageNumber),
+    getSpreadLabelForIndex(index),
+  ]
+    .join(" ")
+    .toLowerCase();
 }
 
 function applySidebarWidth() {
@@ -4646,15 +4923,27 @@ function renderBinder() {
     spreadInner.append(createPagePreview(page, grid));
   });
   els.spreadCanvas.append(spreadInner);
-  els.spreadCanvas.style.setProperty(
-    "--binder-natural-width",
-    `${Math.ceil(spreadInner.offsetWidth || naturalWidth)}px`,
-  );
-  els.spreadCanvas.style.setProperty(
-    "--binder-natural-height",
-    `${Math.ceil(spreadInner.offsetHeight || naturalHeight)}px`,
-  );
-  applyBinderZoom();
+  scheduleBinderMeasurement(naturalWidth, naturalHeight);
+}
+
+function scheduleBinderMeasurement(fallbackWidth, fallbackHeight) {
+  if (state.binderMeasureFrameId !== null) {
+    window.cancelAnimationFrame(state.binderMeasureFrameId);
+  }
+
+  state.binderMeasureFrameId = window.requestAnimationFrame(() => {
+    state.binderMeasureFrameId = null;
+    const spreadInner = els.spreadCanvas.querySelector(".spread-inner");
+    els.spreadCanvas.style.setProperty(
+      "--binder-natural-width",
+      `${Math.ceil(spreadInner?.offsetWidth || fallbackWidth)}px`,
+    );
+    els.spreadCanvas.style.setProperty(
+      "--binder-natural-height",
+      `${Math.ceil(spreadInner?.offsetHeight || fallbackHeight)}px`,
+    );
+    applyBinderZoom();
+  });
 }
 
 function estimatePreviewNaturalHeight(grid) {
@@ -5937,11 +6226,16 @@ async function importProjectJson() {
     state.selectedImageId = state.project.images[0]?.id || null;
     state.selectedCardId = state.project.cards[0]?.id || null;
     clearProjectHistoryTransientState();
+    resetProjectPersistenceState();
     saveProject("Project imported", { resetHistory: true });
     renderAll();
     queueTcgdexCardStorageSlimming();
     try {
-      const persisted = await saveProjectToIndexedDb("Project imported", { reason: "json-import" });
+      state.indexedDbSaveRequest = {
+        message: "Project imported",
+        options: { quiet: false, reason: "json-import" },
+      };
+      const persisted = await flushIndexedDbSaveQueue();
       if (persisted) {
         await refreshLocalProjectChoices();
       } else {

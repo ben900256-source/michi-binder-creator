@@ -841,6 +841,10 @@ input[type="range"] {
   min-height: 0;
 }
 
+.pages-panel input[type="search"] {
+  margin: 0 0 8px;
+}
+
 .page-row {
   display: grid;
   gap: 7px;
