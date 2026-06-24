@@ -2951,7 +2951,7 @@ function bindEvents() {
   });
 
   els.exportJsonButton.addEventListener("click", (event) => {
-    closeProjectMenuModal();
+    closeExportSettingsModal();
     exportProjectJson();
   });
   els.importJsonButton.addEventListener("click", (event) => {
@@ -3691,11 +3691,34 @@ function handleBinderPointerDown(event) {
 }
 
 function isBinderPanBackgroundTarget(target) {
-  if (target.closest(".floating-view-control") || target.closest(".page-preview")) {
+  if (target.closest(".floating-view-control") || isInteractivePanBlocker(target)) {
     return false;
   }
 
   return els.workspace.contains(target);
+}
+
+function isInteractivePanBlocker(target) {
+  return Boolean(
+    target.closest(
+      [
+        "a[href]",
+        "button",
+        "input",
+        "select",
+        "textarea",
+        "summary",
+        "[contenteditable='true']",
+        "[role='button']",
+        "[role='checkbox']",
+        "[role='menuitem']",
+        "[role='option']",
+        "[role='slider']",
+        "[role='switch']",
+        "[tabindex]:not(.workspace):not(.page-preview):not(.binder-sheet):not(.binder-grid)",
+      ].join(","),
+    ),
+  );
 }
 
 function handleBinderPointerMove(event) {

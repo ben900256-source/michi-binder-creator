@@ -189,7 +189,6 @@
         <div class="menu-actions">
           <button id="newProjectButton" type="button">New Project</button>
           <button id="loadLocalButton" type="button">Load Project</button>
-          <button id="exportJsonButton" type="button">Export JSON</button>
           <button id="importJsonButton" type="button">Import JSON</button>
           <button id="deleteProjectButton" type="button" class="danger">Delete Project</button>
         </div>
@@ -249,6 +248,12 @@
       <form id="exportSettingsForm" class="setup-card settings-card">
         <h1>Export</h1>
         <div class="export-setting-sections">
+          <section class="export-section">
+            <h2>Project Backup</h2>
+            <p class="status">Download a portable JSON copy of this project.</p>
+            <button id="exportJsonButton" type="button" class="wide">Export JSON</button>
+          </section>
+
           <section class="export-section">
             <h2>PNG</h2>
             <label class="check-field">

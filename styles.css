@@ -1174,8 +1174,11 @@ input[type="range"] {
 }
 
 .page-preview,
-.page-preview * {
-  cursor: auto;
+.preview-title,
+.binder-sheet,
+.spine,
+.binder-grid {
+  cursor: grab;
 }
 
 .pocket {
