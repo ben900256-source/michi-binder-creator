@@ -173,6 +173,66 @@ select:disabled {
   margin: 0 0 14px;
 }
 
+.setup-card.card-art-card {
+  display: grid;
+  gap: 12px;
+  grid-template-rows: auto minmax(0, 1fr);
+  max-height: min(92vh, 860px);
+  max-width: min(92vw, 480px);
+  overflow: hidden;
+  padding: 14px;
+  width: min(92vw, 480px);
+}
+
+.card-art-heading {
+  align-items: center;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+  min-width: 0;
+}
+
+.setup-card.card-art-card .card-art-heading h1 {
+  font-size: 1rem;
+  line-height: 1.2;
+  margin: 0;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.card-art-close {
+  flex: 0 0 auto;
+  height: 32px;
+  padding: 0;
+  width: 32px;
+}
+
+.card-art-preview {
+  align-items: center;
+  background:
+    linear-gradient(145deg, rgba(255, 255, 255, 0.16), rgba(255, 255, 255, 0.025)),
+    #15181d;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 8px;
+  display: flex;
+  height: min(calc(92vh - 76px), 680px);
+  justify-content: center;
+  min-height: 0;
+  overflow: hidden;
+  padding: 16px;
+}
+
+.card-art-preview img {
+  display: block;
+  height: 100%;
+  max-height: 100%;
+  max-width: 100%;
+  object-fit: contain;
+  width: 100%;
+}
+
 .setup-project-card {
   max-height: calc(100vh - 40px);
   overflow: auto;
@@ -1432,6 +1492,7 @@ input[type="range"] {
 .placement-controls-hidden .placement-badge,
 .placement-controls-hidden .placement-trash,
 .placement-controls-hidden .placement-edit,
+.placement-controls-hidden .placement-view-art,
 .placement-controls-hidden .placement-owned-toggle {
   display: none;
 }
@@ -1501,6 +1562,50 @@ input[type="range"] {
   transform: scale(1.05);
 }
 
+.placement-view-art {
+  align-items: center;
+  background: rgba(32, 36, 42, 0.82);
+  border: 1px solid rgba(255, 255, 255, 0.5);
+  border-radius: 999px;
+  color: #fff;
+  display: flex;
+  height: 30px;
+  justify-content: center;
+  left: 42px;
+  opacity: 0;
+  padding: 0;
+  pointer-events: none;
+  position: absolute;
+  top: 6px;
+  transition:
+    opacity 130ms ease,
+    transform 130ms ease;
+  width: 30px;
+  z-index: 4;
+}
+
+.placement-view-art svg {
+  display: block;
+  fill: none;
+  height: 18px;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2;
+  width: 18px;
+}
+
+.placement:hover .placement-view-art,
+.placement:focus-visible .placement-view-art,
+.placement.selected .placement-view-art {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.placement-view-art:hover {
+  transform: scale(1.05);
+}
+
 .placement-owned-toggle {
   align-items: center;
   background: rgba(36, 152, 95, 0.94);
@@ -1523,6 +1628,10 @@ input[type="range"] {
     opacity 130ms ease,
     transform 130ms ease;
   z-index: 4;
+}
+
+.placement.card-placement .placement-owned-toggle {
+  left: 78px;
 }
 
 .placement.not-owned-card .placement-owned-toggle {

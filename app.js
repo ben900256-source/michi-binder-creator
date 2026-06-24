@@ -115,6 +115,7 @@ const state = {
   indexedDbSavePending: false,
   indexedDbAutoSaveTimer: null,
   indexedDbLastError: null,
+  tcgdexCardStorageSlimmingPending: false,
   projectHistory: {
     undoStack: [],
     redoStack: [],
@@ -189,6 +190,10 @@ const els = {
   helpButton: document.querySelector("#helpButton"),
   helpModal: document.querySelector("#helpModal"),
   helpCloseButton: document.querySelector("#helpCloseButton"),
+  cardArtModal: document.querySelector("#cardArtModal"),
+  cardArtModalTitle: document.querySelector("#cardArtModalTitle"),
+  cardArtModalImage: document.querySelector("#cardArtModalImage"),
+  cardArtModalCloseButton: document.querySelector("#cardArtModalCloseButton"),
   localProjectPicker: document.querySelector("#localProjectPicker"),
   localProjectList: document.querySelector("#localProjectList"),
   localProjectNewButton: document.querySelector("#localProjectNewButton"),
@@ -253,6 +258,7 @@ bindEvents();
 renderAll();
 showMobileWarningIfNeeded();
 hydrateProjectFromIndexedDbIfNeeded();
+queueTcgdexCardStorageSlimming();
 
 function createId() {
   if (window.crypto?.randomUUID) {
@@ -361,7 +367,7 @@ function normalizeProject(input) {
   const images = normalizedImages.filter((image) => image.source !== "tcgdex");
   const cards = dedupeAssetsById([
     ...(Array.isArray(input.cards)
-      ? input.cards.filter((card) => card && typeof card.dataUrl === "string").map(normalizeCardAsset)
+      ? input.cards.filter((card) => card && hasAssetImage(card)).map(normalizeCardAsset)
       : []),
     ...migratedCards.map(normalizeCardAsset),
   ]);
@@ -396,10 +402,13 @@ function normalizeProjectLayout(input) {
 }
 
 function normalizeAsset(asset) {
+  const dataUrl = typeof asset.dataUrl === "string" && asset.dataUrl ? asset.dataUrl : undefined;
+  const imageUrl = typeof asset.imageUrl === "string" && asset.imageUrl ? asset.imageUrl : undefined;
   return {
     id: typeof asset.id === "string" ? asset.id : createId(),
     name: typeof asset.name === "string" ? asset.name : "image",
-    dataUrl: asset.dataUrl,
+    ...(dataUrl ? { dataUrl } : {}),
+    ...(imageUrl ? { imageUrl } : {}),
     source: typeof asset.source === "string" ? asset.source : "upload",
     cardId: typeof asset.cardId === "string" ? asset.cardId : undefined,
     cardName: typeof asset.cardName === "string" ? asset.cardName : undefined,
@@ -716,6 +725,7 @@ function resetTransientProjectState() {
   state.suppressNextBinderClick = false;
   state.indexedDbSavedAt = null;
   state.indexedDbSavePending = false;
+  state.tcgdexCardStorageSlimmingPending = false;
 }
 
 function ensureProjectId(project = state.project) {
@@ -780,6 +790,20 @@ function getImage(imageId) {
 
 function getCard(cardId) {
   return state.project.cards.find((card) => card.id === cardId);
+}
+
+function getAssetImageSrc(asset) {
+  if (typeof asset?.imageUrl === "string" && asset.imageUrl) {
+    return asset.imageUrl;
+  }
+  if (typeof asset?.dataUrl === "string" && asset.dataUrl) {
+    return asset.dataUrl;
+  }
+  return "";
+}
+
+function hasAssetImage(asset) {
+  return Boolean(getAssetImageSrc(asset));
 }
 
 function getSelectedPlacement() {
@@ -875,6 +899,7 @@ function hasBlockingOverlayOpen() {
     els.projectMenuModal,
     els.projectSettingsModal,
     els.helpModal,
+    els.cardArtModal,
     els.localProjectPicker,
     els.exportSettingsModal,
   ].some(isOverlayOpen);
@@ -1336,6 +1361,82 @@ function closeHelpModal() {
   els.helpModal.hidden = true;
 }
 
+function openCardArtModal(card) {
+  const imageSrc = getAssetImageSrc(card);
+  if (!imageSrc) {
+    return;
+  }
+
+  els.cardArtModalTitle.textContent = card.name || "Card Art";
+  els.cardArtModalImage.src = imageSrc;
+  els.cardArtModalImage.alt = card.name || "Card art";
+  els.cardArtModal.hidden = false;
+  window.setTimeout(() => {
+    els.cardArtModalCloseButton.focus();
+  }, 0);
+}
+
+function closeCardArtModal() {
+  els.cardArtModal.hidden = true;
+  els.cardArtModalImage.removeAttribute("src");
+  els.cardArtModalImage.alt = "";
+}
+
+function queueTcgdexCardStorageSlimming() {
+  if (
+    state.tcgdexCardStorageSlimmingPending ||
+    !state.project.cards.some(shouldSlimTcgdexCardStorage)
+  ) {
+    return;
+  }
+
+  state.tcgdexCardStorageSlimmingPending = true;
+  window.setTimeout(() => {
+    void slimTcgdexCardStorage();
+  }, 0);
+}
+
+function shouldSlimTcgdexCardStorage(card) {
+  return card?.source === "tcgdex" && card.cardId && typeof card.dataUrl === "string";
+}
+
+async function slimTcgdexCardStorage() {
+  let changed = false;
+  try {
+    for (const card of state.project.cards) {
+      if (!shouldSlimTcgdexCardStorage(card)) {
+        continue;
+      }
+
+      try {
+        if (!card.imageUrl) {
+          const cardDetail = await fetchTcgdexCardDetail(card.cardId);
+          const imageUrl = getTcgdexCardImageUrl(cardDetail || card, "high", "png");
+          if (!imageUrl) {
+            continue;
+          }
+          card.imageUrl = imageUrl;
+        }
+
+        delete card.dataUrl;
+        state.imageNaturalSizes.delete(card.id);
+        changed = true;
+      } catch (error) {
+        console.warn("Could not slim TCGdex card storage.", error);
+      }
+    }
+
+    if (changed) {
+      saveProjectToLocalStorageBestEffort();
+      queueIndexedDbAutoSave();
+      resetProjectHistory();
+      renderAll();
+    }
+  } finally {
+    state.tcgdexCardStorageSlimmingPending = false;
+  }
+}
+
 function openLocalProjectPicker() {
   els.localProjectPicker.hidden = false;
   window.setTimeout(() => {
@@ -1397,7 +1498,7 @@ function getInferredLastPlacedAssetId(project, preferredPageId = null) {
 
   for (const page of orderedPages) {
     const placements = Array.isArray(page?.placements) ? page.placements.slice().reverse() : [];
-    const placement = placements.find((candidate) => assetMap.get(candidate?.imageId)?.dataUrl);
+    const placement = placements.find((candidate) => hasAssetImage(assetMap.get(candidate?.imageId)));
     if (placement) {
       return placement.imageId;
     }
@@ -1408,7 +1509,7 @@ function getInferredLastPlacedAssetId(project, preferredPageId = null) {
 
 function getProjectLastPlacedAsset(project, lastPlacedAssetId = null, preferredPageId = null) {
   const assetMap = getProjectAssetMap(project);
-  if (lastPlacedAssetId && assetMap.get(lastPlacedAssetId)?.dataUrl) {
+  if (lastPlacedAssetId && hasAssetImage(assetMap.get(lastPlacedAssetId))) {
     return assetMap.get(lastPlacedAssetId);
   }
 
@@ -1483,7 +1584,7 @@ function createLocalProjectPagePreview(project, currentPageId = null, lastPlaced
 
     const placements = (Array.isArray(page.placements) ? page.placements : [])
       .map((placement, index) => ({ placement, index }))
-      .filter(({ placement }) => assetMap.get(placement?.imageId)?.dataUrl && placementFits(placement, stats.rows, stats.cols))
+      .filter(({ placement }) => hasAssetImage(assetMap.get(placement?.imageId)) && placementFits(placement, stats.rows, stats.cols))
       .sort(
         (a, b) =>
           getLocalProjectPlacementLayer(a.placement, a.index, cardAssetIds) -
@@ -1504,7 +1605,7 @@ function createLocalProjectPagePreview(project, currentPageId = null, lastPlaced
       block.style.zIndex = String(renderIndex + 2);
 
       const image = document.createElement("img");
-      image.src = asset.dataUrl;
+      image.src = getAssetImageSrc(asset);
       image.alt = "";
       image.style.transform = cropToTransform(placement.crop);
       block.append(image);
@@ -1520,7 +1621,7 @@ function createLocalProjectPagePreview(project, currentPageId = null, lastPlaced
   lastAssetPreview.className = "local-project-last-asset";
   if (lastAsset) {
     const image = document.createElement("img");
-    image.src = lastAsset.dataUrl;
+    image.src = getAssetImageSrc(lastAsset);
     image.alt = "";
     lastAssetPreview.append(image);
   } else {
@@ -1652,6 +1753,7 @@ async function loadLocalProject(projectId) {
     db.close();
     closeLocalProjectPicker();
     renderAll();
+    queueTcgdexCardStorageSlimming();
   } catch (error) {
     console.warn("Could not load local project.", error);
     setStatus("Local project load failed");
@@ -1864,7 +1966,7 @@ function getImportAssetIds(input) {
   const cards = Array.isArray(input?.cards) ? input.cards : [];
   return new Set(
     [...images, ...cards]
-      .filter((asset) => asset && typeof asset.dataUrl === "string" && typeof asset.id === "string")
+      .filter((asset) => asset && hasAssetImage(asset) && typeof asset.id === "string")
       .map((asset) => asset.id),
   );
 }
@@ -2214,6 +2316,7 @@ async function hydrateProjectFromIndexedDbIfNeeded() {
     });
     if (recovered) {
       renderAll();
+      queueTcgdexCardStorageSlimming();
       return;
     }
   }
@@ -2505,6 +2608,12 @@ function bindEvents() {
       closeHelpModal();
     }
   });
+  els.cardArtModalCloseButton.addEventListener("click", closeCardArtModal);
+  els.cardArtModal.addEventListener("click", (event) => {
+    if (event.target === els.cardArtModal) {
+      closeCardArtModal();
+    }
+  });
   els.localProjectNewButton.addEventListener("click", () => {
     closeLocalProjectPicker();
     startNewProject({ confirm: false });
@@ -2711,6 +2820,11 @@ function bindEvents() {
   els.placementRowsInput.addEventListener("input", () => {
     updateImagePlacementDraftSpan();
   });
+  [els.placementColsInput, els.placementRowsInput].forEach((input) => {
+    input.addEventListener("focus", () => {
+      window.setTimeout(() => input.select(), 0);
+    });
+  });
 
   els.placementCropScaleInput.addEventListener("input", () =>
     updateImagePlacementDraftCrop("scale", els.placementCropScaleInput.value),
@@ -2855,6 +2969,11 @@ function bindEvents() {
 
     if (event.key === "Escape" && !els.helpModal.hidden) {
       closeHelpModal();
+      return;
+    }
+
+    if (event.key === "Escape" && !els.cardArtModal.hidden) {
+      closeCardArtModal();
       return;
     }
 
@@ -3668,11 +3787,13 @@ async function importTcgdexCardArt(card, { statusElement = els.cardSearchStatus,
     const cardDetail = await fetchTcgdexCardDetail(card.id);
     const cardForImport = cardDetail || card;
     const imageUrl = getTcgdexCardImageUrl(cardForImport, "high", "png");
-    const dataUrl = await downloadImageAsDataUrl(imageUrl);
+    if (!imageUrl) {
+      throw new Error("Card art image URL is unavailable");
+    }
     const cardAsset = {
       id: createId(),
       name: formatTcgdexCardImageName(cardForImport),
-      dataUrl,
+      imageUrl,
       source: "tcgdex",
       cardId: cardForImport.id,
       cardName: cardForImport.name,
@@ -3713,30 +3834,6 @@ function formatTcgdexCardImageName(card) {
     .join(" - ");
 }
 
-async function downloadImageAsDataUrl(url) {
-  const response = await fetch(url);
-  if (!response.ok) {
-    throw new Error(`Image download failed with status ${response.status}`);
-  }
-  const blob = await response.blob();
-  return blobToDataUrl(blob);
-}
-
-function blobToDataUrl(blob) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.addEventListener("load", () => {
-      if (typeof reader.result === "string") {
-        resolve(reader.result);
-        return;
-      }
-      reject(new Error("Image could not be read as a data URL"));
-    });
-    reader.addEventListener("error", () => reject(reader.error || new Error("Image could not be loaded")));
-    reader.readAsDataURL(blob);
-  });
-}
-
 function renderCardLibrary() {
   els.cardLibrary.replaceChildren();
   els.cardLibrary.hidden = !state.project.cards.length;
@@ -3760,7 +3857,7 @@ function renderCardLibrary() {
     item.setAttribute("role", "button");
     item.setAttribute("aria-label", `Copy ${card.name} to placement clipboard`);
     item.innerHTML = `<img alt=""><span></span><label class="card-owned-control"><input type="checkbox"><span>Have</span></label>`;
-    item.querySelector("img").src = card.dataUrl;
+    item.querySelector("img").src = getAssetImageSrc(card);
     item.querySelector("img").alt = card.name;
     item.querySelector("span").textContent = card.name;
     item.querySelector(".card-owned-control").addEventListener("click", (event) => {
@@ -4014,9 +4111,36 @@ function updateImagePlacementDraftSpan() {
     return;
   }
 
-  state.imagePlacementDraft.colSpan = clampInteger(els.placementColsInput.value, 1, 8, 1);
-  state.imagePlacementDraft.rowSpan = clampInteger(els.placementRowsInput.value, 1, 8, 1);
+  state.imagePlacementDraft.colSpan = parsePlacementSpanInput(
+    els.placementColsInput,
+    state.imagePlacementDraft.colSpan,
+  );
+  state.imagePlacementDraft.rowSpan = parsePlacementSpanInput(
+    els.placementRowsInput,
+    state.imagePlacementDraft.rowSpan,
+  );
   renderImagePlacementModal();
+}
+
+function parsePlacementSpanInput(input, fallback) {
+  const rawValue = input.value.trim();
+  if (!rawValue) {
+    return fallback;
+  }
+
+  const parsedValue = Number.parseInt(rawValue, 10);
+  if (!Number.isFinite(parsedValue)) {
+    return fallback;
+  }
+
+  if (parsedValue > 8 && rawValue.length > 1) {
+    const lastDigit = Number.parseInt(rawValue.at(-1), 10);
+    if (Number.isFinite(lastDigit) && lastDigit >= 1 && lastDigit <= 8) {
+      return lastDigit;
+    }
+  }
+
+  return clampInteger(parsedValue, 1, 8, fallback);
 }
 
 function syncImagePlacementSpanControls() {
@@ -4093,7 +4217,7 @@ function renderImagePlacementModal() {
   imageLayer.style.height = `${imageBox.height}px`;
 
   const img = document.createElement("img");
-  img.src = image.dataUrl;
+  img.src = getAssetImageSrc(image);
   img.alt = image.name;
   img.style.transform = cropToTransform(draft.crop);
   imageLayer.append(img);
@@ -4196,7 +4320,8 @@ function getImageRatio(image, fallbackRatio) {
 }
 
 function ensureImageNaturalSize(image) {
-  if (!image?.id || !image.dataUrl) return null;
+  const imageSrc = getAssetImageSrc(image);
+  if (!image?.id || !imageSrc) return null;
 
   const cached = state.imageNaturalSizes.get(image.id);
   if (cached) return cached;
@@ -4228,7 +4353,10 @@ function ensureImageNaturalSize(image) {
     },
     { once: true },
   );
-  probe.src = image.dataUrl;
+  if (!imageSrc.startsWith("data:")) {
+    probe.crossOrigin = "anonymous";
+  }
+  probe.src = imageSrc;
   return null;
 }
 
@@ -4700,6 +4828,18 @@ function createPagePreview(page, grid) {
 
     const placementIsCard = isCardPlacement(placement);
     if (placementIsCard) {
+      const viewArt = document.createElement("span");
+      viewArt.className = "placement-view-art";
+      viewArt.title = "View card art";
+      viewArt.setAttribute("aria-label", "View card art");
+      viewArt.innerHTML = `
+        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+          <path d="M2.1 12s3.6-6.5 9.9-6.5 9.9 6.5 9.9 6.5-3.6 6.5-9.9 6.5S2.1 12 2.1 12Z"></path>
+          <circle cx="12" cy="12" r="3"></circle>
+        </svg>
+      `;
+      item.append(viewArt);
+
       const ownedToggle = document.createElement("span");
       ownedToggle.className = "placement-owned-toggle";
       ownedToggle.textContent = isCardOwned(image) ? "Have" : "Need";
@@ -4780,6 +4920,11 @@ function createPagePreview(page, grid) {
           return;
         }
         openPlacementEditModal(page.id, placement.id);
+        return;
+      }
+
+      if (event.target.closest(".placement-view-art")) {
+        openCardArtModal(image);
         return;
       }
 
@@ -4869,7 +5014,7 @@ function createPlacementImageLayer(image, placement, layout, segment = null) {
   }
 
   const img = document.createElement("img");
-  img.src = image.dataUrl;
+  img.src = getAssetImageSrc(image);
   img.alt = image.name || "";
   img.style.transform = cropToTransform(placement.crop);
   if (placementIsCard) {
@@ -4885,7 +5030,7 @@ function createPlacementImageLayer(image, placement, layout, segment = null) {
 
 function cropToTransform(crop) {
   const safeCrop = normalizeCrop(crop);
-  // Crop edits are non-destructive: the original data URL stays intact and CSS clips the view.
+  // Crop edits are non-destructive: the original image source stays intact and CSS clips the view.
   return `translate(${safeCrop.x}%, ${safeCrop.y}%) rotate(${safeCrop.rotate}deg) scale(${safeCrop.scale})`;
 }
 
@@ -5009,7 +5154,7 @@ function getSegmentedPlacementRenderEntries(page) {
   }));
 
   return orderedEntries.flatMap((entry, index) => {
-    if (!entry.image) return [];
+    if (!entry.image || !hasAssetImage(entry.image)) return [];
     if (entry.isCard || !isImagePlacement(entry.placement)) {
       return [{ ...entry, segment: null, segmentIndex: 0, segmentCount: 1 }];
     }
@@ -5794,6 +5939,7 @@ async function importProjectJson() {
     clearProjectHistoryTransientState();
     saveProject("Project imported", { resetHistory: true });
     renderAll();
+    queueTcgdexCardStorageSlimming();
     try {
       const persisted = await saveProjectToIndexedDb("Project imported", { reason: "json-import" });
       if (persisted) {
@@ -6017,7 +6163,7 @@ function splitPdfCutout(cutout, maxWidthMm, maxHeightMm) {
 
 async function renderPdfCutoutTile(cutout, tile, imageCache) {
   if (!imageCache.has(cutout.image.id)) {
-    imageCache.set(cutout.image.id, await loadCanvasImage(cutout.image.dataUrl));
+    imageCache.set(cutout.image.id, await loadCanvasImage(getAssetImageSrc(cutout.image)));
   }
 
   const canvas = document.createElement("canvas");
@@ -6386,7 +6532,7 @@ async function drawPageToCanvas(ctx, page, pageX, pageY, metrics, imageCache) {
 
   for (const entry of getSegmentedPlacementRenderEntries(page)) {
     if (!imageCache.has(entry.image.id)) {
-      imageCache.set(entry.image.id, await loadCanvasImage(entry.image.dataUrl));
+      imageCache.set(entry.image.id, await loadCanvasImage(getAssetImageSrc(entry.image)));
     }
 
     const fullBounds = getCanvasPlacementBounds(entry.placement, gridX, gridY, metrics);
@@ -6508,6 +6654,9 @@ function drawPlacementSegment(ctx, image, crop, fullBounds, visibleBounds, optio
 function loadCanvasImage(src) {
   return new Promise((resolve, reject) => {
     const image = new Image();
+    if (typeof src === "string" && src && !src.startsWith("data:")) {
+      image.crossOrigin = "anonymous";
+    }
     image.addEventListener("load", () => resolve(image));
     image.addEventListener("error", reject);
     image.src = src;
