@@ -9,21 +9,57 @@
     <script src="app.js" defer></script>
   </head>
   <body>
+    <div id="mobileWarning" class="mobile-warning" role="alertdialog" aria-modal="true" aria-labelledby="mobileWarningTitle" hidden>
+      <div class="mobile-warning-panel">
+        <h1 id="mobileWarningTitle">Desktop Recommended</h1>
+        <p>Michi Binder Creator does not function well on mobile. Use a desktop browser for editing.</p>
+        <button id="mobileWarningCloseButton" type="button" class="wide primary">Continue</button>
+      </div>
+    </div>
+
     <div id="projectSetup" class="setup-overlay" hidden>
-      <form id="projectSetupForm" class="setup-card">
+      <form id="projectSetupForm" class="setup-card setup-project-card">
         <h1>Create Binder Project</h1>
         <label class="field">
           <span>Project title</span>
           <input id="setupProjectNameInput" type="text" autocomplete="off" placeholder="My Binder" />
         </label>
+        <label class="field">
+          <span>Binder style</span>
+          <select id="setupBinderPresetInput">
+            <option value="standard">Standard card binder</option>
+            <option value="toploader">Toploader binder</option>
+            <option value="custom">Custom</option>
+          </select>
+        </label>
         <div class="inline-fields">
           <label class="field">
-            <span>Rows</span>
+            <span>Binder height</span>
             <input id="setupRowsInput" type="number" min="1" max="8" step="1" value="3" />
           </label>
           <label class="field">
-            <span>Columns</span>
+            <span>Binder width</span>
             <input id="setupColsInput" type="number" min="1" max="8" step="1" value="3" />
+          </label>
+        </div>
+        <div class="inline-fields">
+          <label class="field">
+            <span>Pocket width</span>
+            <input id="setupPocketWidthInput" type="number" min="10" max="300" step="0.1" value="67" />
+          </label>
+          <label class="field">
+            <span>Pocket height</span>
+            <input id="setupPocketHeightInput" type="number" min="10" max="300" step="0.1" value="92" />
+          </label>
+        </div>
+        <div class="inline-fields">
+          <label class="field">
+            <span>X gap</span>
+            <input id="setupGapXInput" type="number" min="0" max="100" step="0.1" value="3.5" />
+          </label>
+          <label class="field">
+            <span>Y gap</span>
+            <input id="setupGapYInput" type="number" min="0" max="100" step="0.1" value="3.5" />
           </label>
         </div>
         <button type="submit" class="wide primary">Create Project</button>
@@ -153,7 +189,6 @@
         <div class="menu-actions">
           <button id="newProjectButton" type="button">New Project</button>
           <button id="loadLocalButton" type="button">Load Project</button>
-          <button id="projectSettingsButton" type="button">Project Settings</button>
           <button id="exportJsonButton" type="button">Export JSON</button>
           <button id="importJsonButton" type="button">Import JSON</button>
           <button id="deleteProjectButton" type="button" class="danger">Delete Project</button>
@@ -165,6 +200,24 @@
     <div id="projectSettingsModal" class="setup-overlay" hidden>
       <form id="projectSettingsForm" class="setup-card settings-card">
         <h1>Project Settings</h1>
+        <label class="field">
+          <span>Binder style</span>
+          <select id="settingsBinderPresetInput">
+            <option value="standard">Standard card binder</option>
+            <option value="toploader">Toploader binder</option>
+            <option value="custom">Custom</option>
+          </select>
+        </label>
+        <div class="inline-fields">
+          <label class="field">
+            <span>Binder width</span>
+            <input id="settingsBinderWidthInput" type="number" min="1" max="8" step="1" />
+          </label>
+          <label class="field">
+            <span>Binder height</span>
+            <input id="settingsBinderHeightInput" type="number" min="1" max="8" step="1" />
+          </label>
+        </div>
         <div class="inline-fields">
           <label class="field">
             <span>Pocket width</span>
@@ -276,6 +329,7 @@
             <h2>Project</h2>
             <div class="panel-heading-actions">
               <button id="helpButton" type="button" class="small-action-button">Help</button>
+              <button id="projectSettingsButton" type="button" class="small-action-button">Settings</button>
               <button id="projectMenuButton" type="button" class="small-action-button">Menu</button>
             </div>
           </div>
@@ -293,7 +347,7 @@
           <p id="statusText" class="status" aria-live="polite"></p>
         </section>
 
-        <section class="panel">
+        <section class="panel pages-panel">
           <div class="panel-heading">
             <h2>Pages</h2>
             <button id="newPageButton" type="button" class="small-action-button">New Page</button>

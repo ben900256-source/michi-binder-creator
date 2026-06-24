@@ -6,16 +6,30 @@ const INDEXED_DB_STORE = "projects";
 const INDEXED_DB_CURRENT_PROJECT_ID = "current";
 const SIDEBAR_WIDTH_KEY = "michiBinderCreator.sidebarWidth.v1";
 const EXPORT_SETTINGS_KEY = "michiBinderCreator.exportSettings.v1";
+const MOBILE_WARNING_DISMISSED_KEY = "michiBinderCreator.mobileWarningDismissed.v1";
+const LOCAL_STORAGE_PROJECT_MAX_CHARS = 4_500_000;
+const STORAGE_DIAGNOSTICS_ENABLED = false;
 const BINDER_ZOOM_MIN = 0.05;
 const BINDER_ZOOM_MAX = 2;
 const SIDEBAR_WIDTH_MIN = 240;
 const SIDEBAR_WIDTH_MAX = 560;
 const DEFAULT_PROJECT_LAYOUT = {
-  pocketWidth: 63,
-  pocketHeight: 88,
+  pocketWidth: 67,
+  pocketHeight: 92,
   gapX: 3.5,
   gapY: 3.5,
 };
+const PROJECT_LAYOUT_PRESETS = {
+  standard: {
+    pocketWidth: DEFAULT_PROJECT_LAYOUT.pocketWidth,
+    pocketHeight: DEFAULT_PROJECT_LAYOUT.pocketHeight,
+  },
+  toploader: {
+    pocketWidth: 86,
+    pocketHeight: 110,
+  },
+};
+const CUSTOM_PROJECT_LAYOUT_PRESET = "custom";
 const PDF_PAGE_WIDTH_MM = 215.9;
 const PDF_PAGE_HEIGHT_MM = 279.4;
 const PDF_MARGIN_MM = 10;
@@ -26,6 +40,8 @@ const PDF_IMAGE_PX_PER_MM = 6;
 const PDF_POINTS_PER_MM = 72 / 25.4;
 const CARD_SEARCH_PAGE_SIZE = 24;
 const PROJECT_HISTORY_MAX_DEPTH = 50;
+const CARD_FACE_WIDTH_MM = 63;
+const CARD_FACE_HEIGHT_MM = 88;
 
 const DEFAULT_CROP = {
   scale: 1,
@@ -98,6 +114,7 @@ const state = {
   indexedDbSavedAt: null,
   indexedDbSavePending: false,
   indexedDbAutoSaveTimer: null,
+  indexedDbLastError: null,
   projectHistory: {
     undoStack: [],
     redoStack: [],
@@ -107,14 +124,21 @@ const state = {
 };
 
 const els = {
+  mobileWarning: document.querySelector("#mobileWarning"),
+  mobileWarningCloseButton: document.querySelector("#mobileWarningCloseButton"),
   projectNameInput: document.querySelector("#projectNameInput"),
   undoProjectButton: document.querySelector("#undoProjectButton"),
   redoProjectButton: document.querySelector("#redoProjectButton"),
   projectSetup: document.querySelector("#projectSetup"),
   projectSetupForm: document.querySelector("#projectSetupForm"),
   setupProjectNameInput: document.querySelector("#setupProjectNameInput"),
+  setupBinderPresetInput: document.querySelector("#setupBinderPresetInput"),
   setupRowsInput: document.querySelector("#setupRowsInput"),
   setupColsInput: document.querySelector("#setupColsInput"),
+  setupPocketWidthInput: document.querySelector("#setupPocketWidthInput"),
+  setupPocketHeightInput: document.querySelector("#setupPocketHeightInput"),
+  setupGapXInput: document.querySelector("#setupGapXInput"),
+  setupGapYInput: document.querySelector("#setupGapYInput"),
   projectBinderSummary: document.querySelector("#projectBinderSummary"),
   localSaveSummary: document.querySelector("#localSaveSummary"),
   imageImportWizard: document.querySelector("#imageImportWizard"),
@@ -176,6 +200,9 @@ const els = {
   projectSettingsModal: document.querySelector("#projectSettingsModal"),
   projectSettingsForm: document.querySelector("#projectSettingsForm"),
   projectSettingsCancelButton: document.querySelector("#projectSettingsCancelButton"),
+  settingsBinderPresetInput: document.querySelector("#settingsBinderPresetInput"),
+  settingsBinderWidthInput: document.querySelector("#settingsBinderWidthInput"),
+  settingsBinderHeightInput: document.querySelector("#settingsBinderHeightInput"),
   settingsPocketWidthInput: document.querySelector("#settingsPocketWidthInput"),
   settingsPocketHeightInput: document.querySelector("#settingsPocketHeightInput"),
   settingsGapXInput: document.querySelector("#settingsGapXInput"),
@@ -224,6 +251,7 @@ state.lastPlacedAssetId = getInferredLastPlacedAssetId(state.project, state.last
 resetProjectHistory();
 bindEvents();
 renderAll();
+showMobileWarningIfNeeded();
 hydrateProjectFromIndexedDbIfNeeded();
 
 function createId() {
@@ -269,6 +297,10 @@ function loadProject() {
     console.warn("Could not load saved binder project.", error);
     return createDefaultProject();
   }
+}
+
+function hasLocalStorageProject() {
+  return Boolean(localStorage.getItem(STORAGE_KEY));
 }
 
 function loadExportSettings() {
@@ -672,7 +704,7 @@ function resetTransientProjectState() {
 }
 
 function ensureProjectId(project = state.project) {
-  if (!project.id) {
+  if (!project.id || project.id === INDEXED_DB_CURRENT_PROJECT_ID) {
     project.id = createId();
   }
   return project.id;
@@ -921,6 +953,7 @@ function redoProjectChange() {
 }
 
 function saveProject(message = "Saved", options = {}) {
+  ensureProjectId();
   if (options.modifiedPageId) {
     setLastModifiedPageId(options.modifiedPageId);
   }
@@ -941,17 +974,64 @@ function saveProject(message = "Saved", options = {}) {
 function saveProjectToLocalStorageBestEffort() {
   try {
     ensureProjectId();
+    if (!canMirrorProjectToLocalStorage(state.project)) {
+      localStorage.removeItem(STORAGE_KEY);
+      localStorage.setItem(CURRENT_PAGE_KEY, state.currentPageId);
+      return false;
+    }
+
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state.project));
     localStorage.setItem(CURRENT_PAGE_KEY, state.currentPageId);
+    return true;
   } catch (error) {
     console.warn("Could not save project to localStorage.", error);
     localStorage.removeItem(STORAGE_KEY);
     localStorage.setItem(CURRENT_PAGE_KEY, state.currentPageId);
+    return false;
   }
+}
+
+function canMirrorProjectToLocalStorage(project) {
+  return getProjectEmbeddedDataUrlChars(project) < LOCAL_STORAGE_PROJECT_MAX_CHARS;
+}
+
+function getProjectEmbeddedDataUrlChars(project) {
+  const assets = [
+    ...(Array.isArray(project?.images) ? project.images : []),
+    ...(Array.isArray(project?.cards) ? project.cards : []),
+  ];
+
+  return assets.reduce(
+    (total, asset) => total + (typeof asset?.dataUrl === "string" ? asset.dataUrl.length : 0),
+    0,
+  );
 }
 
 function setStatus(message) {
   els.statusText.textContent = message;
+}
+
+function isMobileViewport() {
+  return (
+    window.matchMedia("(max-width: 760px)").matches ||
+    window.matchMedia("(pointer: coarse) and (max-width: 1024px)").matches
+  );
+}
+
+function showMobileWarningIfNeeded() {
+  if (!els.mobileWarning || sessionStorage.getItem(MOBILE_WARNING_DISMISSED_KEY) || !isMobileViewport()) {
+    return;
+  }
+
+  els.mobileWarning.hidden = false;
+  window.setTimeout(() => {
+    els.mobileWarningCloseButton?.focus();
+  }, 0);
+}
+
+function closeMobileWarning() {
+  sessionStorage.setItem(MOBILE_WARNING_DISMISSED_KEY, "1");
+  els.mobileWarning.hidden = true;
 }
 
 function closeParentDetails(element) {
@@ -973,14 +1053,28 @@ function closeProjectMenuModal() {
 }
 
 function openProjectSettingsModal() {
+  const grid = getProjectGrid();
   const layout = getProjectLayout();
-  els.settingsPocketWidthInput.value = layout.pocketWidth;
-  els.settingsPocketHeightInput.value = layout.pocketHeight;
-  els.settingsGapXInput.value = layout.gapX;
-  els.settingsGapYInput.value = layout.gapY;
+  syncProjectGridControls(
+    {
+      rows: els.settingsBinderHeightInput,
+      cols: els.settingsBinderWidthInput,
+    },
+    grid,
+  );
+  syncProjectLayoutControls(
+    {
+      preset: els.settingsBinderPresetInput,
+      pocketWidth: els.settingsPocketWidthInput,
+      pocketHeight: els.settingsPocketHeightInput,
+      gapX: els.settingsGapXInput,
+      gapY: els.settingsGapYInput,
+    },
+    layout,
+  );
   els.projectSettingsModal.hidden = false;
   window.setTimeout(() => {
-    els.settingsPocketWidthInput.focus();
+    els.settingsBinderWidthInput.focus();
   }, 0);
 }
 
@@ -1045,6 +1139,83 @@ function getExportSettings() {
   return state.exportSettings;
 }
 
+function syncProjectGridControls(controls, grid = getProjectGrid()) {
+  controls.rows.value = grid.rows;
+  controls.cols.value = grid.cols;
+}
+
+function getProjectGridFromControls(controls) {
+  return {
+    rows: clampInteger(controls.rows.value, 1, 8, 3),
+    cols: clampInteger(controls.cols.value, 1, 8, 3),
+  };
+}
+
+function syncProjectLayoutControls(controls, layout = getProjectLayout()) {
+  controls.pocketWidth.value = layout.pocketWidth;
+  controls.pocketHeight.value = layout.pocketHeight;
+  controls.gapX.value = layout.gapX;
+  controls.gapY.value = layout.gapY;
+  if (controls.preset) {
+    controls.preset.value = getProjectLayoutPreset(layout);
+  }
+}
+
+function getProjectLayoutFromControls(controls) {
+  return normalizeProjectLayout({
+    pocketWidth: controls.pocketWidth.value,
+    pocketHeight: controls.pocketHeight.value,
+    gapX: controls.gapX.value,
+    gapY: controls.gapY.value,
+  });
+}
+
+function getProjectLayoutPreset(layout = getProjectLayout()) {
+  const normalizedLayout = normalizeProjectLayout(layout);
+  const preset = Object.entries(PROJECT_LAYOUT_PRESETS).find(([, presetLayout]) =>
+    layoutDimensionsMatchPreset(normalizedLayout, presetLayout),
+  );
+  return preset?.[0] || CUSTOM_PROJECT_LAYOUT_PRESET;
+}
+
+function layoutDimensionsMatchPreset(layout, presetLayout) {
+  return (
+    Math.abs(Number(layout.pocketWidth) - presetLayout.pocketWidth) < 0.05 &&
+    Math.abs(Number(layout.pocketHeight) - presetLayout.pocketHeight) < 0.05
+  );
+}
+
+function applyProjectLayoutPreset(controls) {
+  const presetLayout = PROJECT_LAYOUT_PRESETS[controls.preset.value];
+  if (!presetLayout) {
+    return;
+  }
+
+  const currentLayout = getProjectLayoutFromControls(controls);
+  syncProjectLayoutControls(controls, {
+    ...currentLayout,
+    pocketWidth: presetLayout.pocketWidth,
+    pocketHeight: presetLayout.pocketHeight,
+  });
+  controls.preset.value = getProjectLayoutPreset(getProjectLayoutFromControls(controls));
+}
+
+function syncProjectLayoutPresetFromControls(controls) {
+  controls.preset.value = getProjectLayoutPreset(getProjectLayoutFromControls(controls));
+}
+
+function bindProjectLayoutPresetControls(controls) {
+  controls.preset.addEventListener("change", () => {
+    applyProjectLayoutPreset(controls);
+  });
+
+  [controls.pocketWidth, controls.pocketHeight].forEach((input) => {
+    input.addEventListener("input", () => {
+      syncProjectLayoutPresetFromControls(controls);
+    });
+  });
+}
+
 function getExportPageSelection(settings = getExportSettings().png) {
   return parsePageRange(settings.pageRange, state.project.pages.length);
 }
@@ -1103,12 +1274,35 @@ function parsePageRange(rangeText, totalPages) {
 }
 
 function saveProjectSettings() {
-  state.project.layout = normalizeProjectLayout({
-    pocketWidth: els.settingsPocketWidthInput.value,
-    pocketHeight: els.settingsPocketHeightInput.value,
-    gapX: els.settingsGapXInput.value,
-    gapY: els.settingsGapYInput.value,
+  const { rows, cols } = getProjectGridFromControls({
+    rows: els.settingsBinderHeightInput,
+    cols: els.settingsBinderWidthInput,
   });
+  const invalidPlacements = state.project.pages.flatMap((page) =>
+    page.placements.filter((placement) => !placementFits(placement, rows, cols)),
+  );
+
+  if (
+    invalidPlacements.length &&
+    !window.confirm("This binder size will remove placements outside the new bounds. Continue?")
+  ) {
+    return;
+  }
+
+  state.project.rows = rows;
+  state.project.cols = cols;
+  state.project.layout = getProjectLayoutFromControls({
+    pocketWidth: els.settingsPocketWidthInput,
+    pocketHeight: els.settingsPocketHeightInput,
+    gapX: els.settingsGapXInput,
+    gapY: els.settingsGapYInput,
+  });
+  state.project.pages.forEach((page) => {
+    page.placements = page.placements.filter((placement) => placementFits(placement, rows, cols));
+  });
+  if (!getSelectedPlacement()) {
+    state.selectedPlacementId = null;
+  }
   state.project.localAutoSave = true;
   closeProjectSettingsModal();
   saveProject("Project settings updated");
@@ -1251,11 +1445,21 @@ function createLocalProjectPagePreview(project, currentPageId = null, lastPlaced
     pageRender.style.gridTemplateColumns = `repeat(${stats.cols}, minmax(0, 1fr))`;
     pageRender.style.gridTemplateRows = `repeat(${stats.rows}, minmax(0, 1fr))`;
     pageRender.style.aspectRatio = `${gridDimensions.width} / ${gridDimensions.height}`;
+    const cardOccupiedSlots = getCardOccupiedSlotsForAssetIds(
+      page,
+      { rows: stats.rows, cols: stats.cols },
+      cardAssetIds,
+    );
 
     for (let row = 0; row < stats.rows; row += 1) {
       for (let col = 0; col < stats.cols; col += 1) {
         const pocket = document.createElement("span");
-        pocket.className = "local-project-page-pocket";
+        pocket.className = [
+          "local-project-page-pocket",
+          cardOccupiedSlots.has(getSlotKey(row, col)) ? "card-occupied" : "",
+        ]
+          .filter(Boolean)
+          .join(" ");
         pocket.style.gridRow = `${row + 1} / span 1`;
         pocket.style.gridColumn = `${col + 1} / span 1`;
         pageRender.append(pocket);
@@ -1274,7 +1478,12 @@ function createLocalProjectPagePreview(project, currentPageId = null, lastPlaced
     placements.forEach(({ placement }, renderIndex) => {
       const asset = assetMap.get(placement.imageId);
       const block = document.createElement("span");
-      block.className = "local-project-page-placement";
+      block.className = [
+        "local-project-page-placement",
+        cardAssetIds.has(placement.imageId) ? "card-placement" : "",
+      ]
+        .filter(Boolean)
+        .join(" ");
       block.style.gridRow = `${placement.row + 1} / span ${placement.rowSpan}`;
       block.style.gridColumn = `${placement.col + 1} / span ${placement.colSpan}`;
       block.style.zIndex = String(renderIndex + 2);
@@ -1312,7 +1521,9 @@ function renderLocalProjectPicker() {
   if (!state.localProjectChoices.length) {
     const empty = document.createElement("div");
     empty.className = "empty-state";
-    empty.textContent = "No local projects";
+    empty.textContent = state.indexedDbLastError
+      ? "Project storage unavailable."
+      : "No local projects saved for this browser URL.";
     els.localProjectList.append(empty);
     return;
   }
@@ -1333,7 +1544,7 @@ function renderLocalProjectPicker() {
     copy.className = "local-project-copy";
     const savedText = record.savedAt ? new Date(record.savedAt).toLocaleString() : "Unknown save time";
     const statsText = formatProjectQuickStats(getProjectQuickStats(record.project));
-    copy.innerHTML = `<strong></strong><small></small><small></small><small></small>`;
+    copy.innerHTML = `<strong></strong><small></small><small></small><small></small><small></small>`;
     copy.querySelector("strong").textContent = record.name || "Untitled Binder";
     const details = copy.querySelectorAll("small");
     details[0].textContent = getProjectPreviewPageLabel(record.project, previewPageId);
@@ -1447,11 +1658,24 @@ function openProjectDatabase() {
       }
     });
     request.addEventListener("success", () => resolve(request.result));
-    request.addEventListener("error", () => reject(request.error));
+    request.addEventListener("error", () => {
+      console.error("[Michi Binder storage] IndexedDB open failed", {
+        database: INDEXED_DB_NAME,
+        store: INDEXED_DB_STORE,
+        error: getSerializableError(request.error),
+      });
+      reject(request.error);
+    });
+    request.addEventListener("blocked", () => {
+      console.warn("[Michi Binder storage] IndexedDB open blocked", {
+        database: INDEXED_DB_NAME,
+        store: INDEXED_DB_STORE,
+      });
+    });
   });
 }
 
-async function saveProjectToIndexedDb(message = "Saved local", { quiet = false } = {}) {
+async function saveProjectToIndexedDb(message = "Saved local", { quiet = false, reason = "autosave" } = {}) {
   if (state.indexedDbAutoSaveTimer) {
     window.clearTimeout(state.indexedDbAutoSaveTimer);
     state.indexedDbAutoSaveTimer = null;
@@ -1459,42 +1683,461 @@ async function saveProjectToIndexedDb(message = "Saved local", { quiet = false }
 
   state.indexedDbSavePending = true;
   renderProjectControls();
+  let db = null;
+  const savedAt = new Date().toISOString();
+  const projectId = ensureProjectId();
+  const projectCopy = JSON.parse(JSON.stringify(state.project));
+  projectCopy.id = projectId;
+  const shouldLogDiagnostics = STORAGE_DIAGNOSTICS_ENABLED && (!quiet || reason === "json-import");
+  const projectJson = shouldLogDiagnostics ? JSON.stringify(projectCopy) : "";
+  const lastPlacedAssetId = getImage(state.lastPlacedAssetId)
+    ? state.lastPlacedAssetId
+    : getInferredLastPlacedAssetId(state.project, state.lastModifiedPageId);
 
   try {
-    const db = await openProjectDatabase();
-    const savedAt = new Date().toISOString();
-    const projectId = ensureProjectId();
-    const projectCopy = JSON.parse(JSON.stringify(state.project));
-    projectCopy.id = projectId;
-    const lastPlacedAssetId = getImage(state.lastPlacedAssetId)
-      ? state.lastPlacedAssetId
-      : getInferredLastPlacedAssetId(state.project, state.lastModifiedPageId);
-    await putIndexedDbRecord(db, {
-      id: projectId,
+    if (shouldLogDiagnostics) {
+      await logProjectStorageDiagnostics("IndexedDB save requested", projectCopy, {
+        message,
+        reason,
+        savedAt,
+        projectJson,
+      });
+    }
+    db = await openProjectDatabase();
+    await putProjectIndexedDbRecords(db, projectCopy, savedAt, lastPlacedAssetId);
+    state.indexedDbSavedAt = savedAt;
+    state.indexedDbLastError = null;
+    if (!quiet) {
+      setStatus(message);
+    }
+    if (shouldLogDiagnostics) {
+      await logProjectStorageDiagnostics("IndexedDB save succeeded", projectCopy, {
+        message,
+        reason,
+        savedAt,
+        projectJson,
+      });
+    }
+    return true;
+  } catch (error) {
+    console.error("Could not save project to IndexedDB.", error);
+    state.indexedDbLastError = error;
+    await logProjectStorageDiagnostics("IndexedDB save failed", projectCopy, {
+      message,
+      reason,
+      savedAt,
+      projectJson,
+      error,
+    });
+    setStatus("Autosave failed");
+    return false;
+  } finally {
+    db?.close();
+    state.indexedDbSavePending = false;
+    renderProjectControls();
+  }
+}
+
+async function putProjectIndexedDbRecords(db, projectCopy, savedAt, lastPlacedAssetId) {
+  await putIndexedDbRecord(
+    db,
+    {
+      id: projectCopy.id,
       name: projectCopy.name || "Untitled Binder",
       savedAt,
       currentPageId: state.currentPageId,
       lastModifiedPageId: state.lastModifiedPageId || state.currentPageId,
       lastPlacedAssetId,
       project: projectCopy,
-    });
-    await putIndexedDbRecord(db, {
+    },
+    { label: "project", savedAt },
+  );
+  await putIndexedDbRecord(
+    db,
+    {
       id: INDEXED_DB_CURRENT_PROJECT_ID,
-      currentProjectId: projectId,
+      currentProjectId: projectCopy.id,
       savedAt,
-    });
-    db.close();
-    state.indexedDbSavedAt = savedAt;
-    if (!quiet) {
-      setStatus(message);
-    }
-  } catch (error) {
-    console.warn("Could not save project to IndexedDB.", error);
-    setStatus("Autosave failed");
-  } finally {
-    state.indexedDbSavePending = false;
-    renderProjectControls();
+    },
+    { label: "current pointer", savedAt },
+  );
+}
+
+function getStringByteLength(value = "") {
+  return String(value).length;
+}
+
+function formatBytes(bytes = 0) {
+  if (!Number.isFinite(bytes) || bytes <= 0) {
+    return "0 B";
   }
+  const units = ["B", "KB", "MB", "GB"];
+  let value = bytes;
+  let unitIndex = 0;
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+  return `${value.toFixed(value >= 10 || unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`;
+}
+
+function getSerializableError(error) {
+  if (!error) {
+    return null;
+  }
+  return {
+    name: error.name || "Error",
+    message: error.message || String(error),
+    code: error.code ?? null,
+    stack: error.stack || null,
+  };
+}
+
+function getAssetStorageDetails(asset, type) {
+  const dataUrl = typeof asset?.dataUrl === "string" ? asset.dataUrl : "";
+  const dataUrlBytes = getStringByteLength(dataUrl);
+  const mime = dataUrl.match(/^data:([^;,]+)/)?.[1] || "";
+  return {
+    type,
+    id: asset?.id || "",
+    name: asset?.name || "Untitled",
+    source: asset?.source || "",
+    mime,
+    dataUrlChars: dataUrl.length,
+    dataUrlBytes,
+    dataUrlSize: formatBytes(dataUrlBytes),
+  };
+}
+
+function getProjectStorageDiagnostics(project, projectJson = JSON.stringify(project)) {
+  const images = Array.isArray(project?.images) ? project.images : [];
+  const cards = Array.isArray(project?.cards) ? project.cards : [];
+  const pages = Array.isArray(project?.pages) ? project.pages : [];
+  const placements = pages.reduce((total, page) => total + (page?.placements?.length || 0), 0);
+  const assets = [
+    ...images.map((asset) => getAssetStorageDetails(asset, "image")),
+    ...cards.map((asset) => getAssetStorageDetails(asset, "card")),
+  ];
+  const assetDataUrlBytes = assets.reduce((total, asset) => total + asset.dataUrlBytes, 0);
+  const projectJsonBytes = getStringByteLength(projectJson);
+
+  return {
+    projectId: project?.id || "",
+    projectName: project?.name || "Untitled Binder",
+    setupComplete: project?.setupComplete === true,
+    pages: pages.length,
+    placements,
+    images: images.length,
+    cards: cards.length,
+    projectJsonBytes,
+    projectJsonSize: formatBytes(projectJsonBytes),
+    assetDataUrlBytes,
+    assetDataUrlSize: formatBytes(assetDataUrlBytes),
+    largestAssets: assets
+      .sort((a, b) => b.dataUrlBytes - a.dataUrlBytes)
+      .slice(0, 10),
+    currentPageId: state.currentPageId,
+    lastModifiedPageId: state.lastModifiedPageId,
+    lastPlacedAssetId: state.lastPlacedAssetId,
+    locationProtocol: window.location.protocol,
+    locationOrigin: window.location.origin,
+  };
+}
+
+function getImportAssetIds(input) {
+  const images = Array.isArray(input?.images) ? input.images : [];
+  const cards = Array.isArray(input?.cards) ? input.cards : [];
+  return new Set(
+    [...images, ...cards]
+      .filter((asset) => asset && typeof asset.dataUrl === "string" && typeof asset.id === "string")
+      .map((asset) => asset.id),
+  );
+}
+
+function hasOwnField(object, key) {
+  return Object.prototype.hasOwnProperty.call(object || {}, key);
+}
+
+function getRawPlacementCount(input) {
+  return Array.isArray(input?.pages)
+    ? input.pages.reduce((total, page) => total + (Array.isArray(page?.placements) ? page.placements.length : 0), 0)
+    : 0;
+}
+
+function getNormalizedPlacementCount(project) {
+  return Array.isArray(project?.pages)
+    ? project.pages.reduce((total, page) => total + (Array.isArray(page?.placements) ? page.placements.length : 0), 0)
+    : 0;
+}
+
+function getProjectImportCompatibilityDiagnostics(input, normalizedProject) {
+  const pages = Array.isArray(input?.pages) ? input.pages : [];
+  const firstPage = pages[0] || null;
+  const assetIds = getImportAssetIds(input);
+  const layoutSource =
+    input?.layout && typeof input.layout === "object"
+      ? "project.layout"
+      : ["pocketWidth", "pocketHeight", "gapX", "gapY"].some((key) => hasOwnField(input, key))
+        ? "legacy top-level layout fields"
+        : "defaults";
+  const rawLayout = layoutSource === "project.layout" ? input.layout : input;
+  const missingLayoutFields = Object.keys(DEFAULT_PROJECT_LAYOUT).filter((key) => !Number.isFinite(Number(rawLayout?.[key])));
+  const rawRows = input?.rows;
+  const rawCols = input?.cols;
+  const legacyFirstPageRows = firstPage?.rows;
+  const legacyFirstPageCols = firstPage?.cols;
+  const droppedPlacementDetails = [];
+  let missingAssetRefs = 0;
+  let outOfBoundsPlacements = 0;
+
+  pages.forEach((page, pageIndex) => {
+    const placements = Array.isArray(page?.placements) ? page.placements : [];
+    placements.forEach((placement, placementIndex) => {
+      if (!placement || typeof placement !== "object") {
+        droppedPlacementDetails.push({ pageIndex, placementIndex, reason: "placement is not an object" });
+        return;
+      }
+      if (!assetIds.has(placement.imageId)) {
+        missingAssetRefs += 1;
+        droppedPlacementDetails.push({
+          pageIndex,
+          placementIndex,
+          reason: "missing asset reference",
+          imageId: placement.imageId || null,
+        });
+        return;
+      }
+
+      const normalizedPlacement = normalizePlacement(placement, assetIds);
+      if (!normalizedPlacement || !placementFits(normalizedPlacement, normalizedProject.rows, normalizedProject.cols)) {
+        outOfBoundsPlacements += 1;
+        droppedPlacementDetails.push({
+          pageIndex,
+          placementIndex,
+          reason: "placement does not fit normalized grid",
+          raw: {
+            row: placement.row,
+            col: placement.col,
+            rowSpan: placement.rowSpan,
+            colSpan: placement.colSpan,
+          },
+          normalizedGrid: {
+            rows: normalizedProject.rows,
+            cols: normalizedProject.cols,
+          },
+        });
+      }
+    });
+  });
+
+  return {
+    rawProjectType: input && typeof input === "object" ? "object" : typeof input,
+    rawProjectId: typeof input?.id === "string" ? input.id : null,
+    normalizedProjectId: normalizedProject.id,
+    usedReservedProjectId: input?.id === INDEXED_DB_CURRENT_PROJECT_ID,
+    rawRows,
+    rawCols,
+    legacyFirstPageRows,
+    legacyFirstPageCols,
+    normalizedRows: normalizedProject.rows,
+    normalizedCols: normalizedProject.cols,
+    layoutSource,
+    rawLayout: {
+      pocketWidth: rawLayout?.pocketWidth,
+      pocketHeight: rawLayout?.pocketHeight,
+      gapX: rawLayout?.gapX,
+      gapY: rawLayout?.gapY,
+    },
+    normalizedLayout: normalizedProject.layout,
+    missingLayoutFields,
+    rawPages: pages.length,
+    normalizedPages: normalizedProject.pages.length,
+    rawPlacements: getRawPlacementCount(input),
+    normalizedPlacements: getNormalizedPlacementCount(normalizedProject),
+    droppedPlacements: getRawPlacementCount(input) - getNormalizedPlacementCount(normalizedProject),
+    missingAssetRefs,
+    outOfBoundsPlacements,
+    droppedPlacementDetails: droppedPlacementDetails.slice(0, 20),
+    rawImages: Array.isArray(input?.images) ? input.images.length : 0,
+    normalizedImages: normalizedProject.images.length,
+    rawCards: Array.isArray(input?.cards) ? input.cards.length : 0,
+    normalizedCards: normalizedProject.cards.length,
+    tcgdexImagesMigratedToCards: Array.isArray(input?.images)
+      ? input.images.filter((image) => image?.source === "tcgdex").length
+      : 0,
+  };
+}
+
+function logProjectImportDiagnostics(rawProject, normalizedProject, context = {}) {
+  if (!STORAGE_DIAGNOSTICS_ENABLED) {
+    return;
+  }
+
+  const group = console.groupCollapsed || console.group;
+  const endGroup = console.groupEnd || (() => {});
+  const rawJson = context.rawJson || "";
+  const normalizedJson = JSON.stringify(normalizedProject);
+
+  group.call(console, "[Michi Binder import] JSON compatibility");
+  console.info("context", {
+    fileName: context.fileName || "",
+    rawJsonBytes: getStringByteLength(rawJson),
+    rawJsonSize: formatBytes(getStringByteLength(rawJson)),
+    normalizedJsonBytes: getStringByteLength(normalizedJson),
+    normalizedJsonSize: formatBytes(getStringByteLength(normalizedJson)),
+  });
+  console.info("compatibility", getProjectImportCompatibilityDiagnostics(rawProject, normalizedProject));
+  console.info("normalized storage", getProjectStorageDiagnostics(normalizedProject, normalizedJson));
+  endGroup.call(console);
+}
+
+async function getStorageEstimateForDiagnostics() {
+  if (!navigator.storage?.estimate) {
+    return null;
+  }
+
+  try {
+    const estimate = await navigator.storage.estimate();
+    return {
+      usageBytes: estimate.usage ?? null,
+      usageSize: estimate.usage == null ? null : formatBytes(estimate.usage),
+      quotaBytes: estimate.quota ?? null,
+      quotaSize: estimate.quota == null ? null : formatBytes(estimate.quota),
+      percentUsed:
+        estimate.usage != null && estimate.quota
+          ? `${((estimate.usage / estimate.quota) * 100).toFixed(2)}%`
+          : null,
+    };
+  } catch (error) {
+    return { error: getSerializableError(error) };
+  }
+}
+
+async function logProjectStorageDiagnostics(label, project, details = {}) {
+  if (!STORAGE_DIAGNOSTICS_ENABLED) {
+    return;
+  }
+
+  const { projectJson = JSON.stringify(project), error, ...context } = details;
+  const diagnostics = getProjectStorageDiagnostics(project, projectJson);
+  const storageEstimate = await getStorageEstimateForDiagnostics();
+  const group = console.groupCollapsed || console.group;
+  const endGroup = console.groupEnd || (() => {});
+
+  group.call(console, `[Michi Binder storage] ${label}`);
+  console.info("context", {
+    ...context,
+    error: getSerializableError(error),
+  });
+  console.info("project", diagnostics);
+  if (storageEstimate) {
+    console.info("navigator.storage.estimate()", storageEstimate);
+  }
+  if (error) {
+    console.error("error", error);
+  }
+  endGroup.call(console);
+}
+
+function getLocalStorageDiagnostics() {
+  const saved = localStorage.getItem(STORAGE_KEY);
+  const currentPageId = localStorage.getItem(CURRENT_PAGE_KEY);
+  const result = {
+    storageKey: STORAGE_KEY,
+    currentPageKey: CURRENT_PAGE_KEY,
+    hasProject: Boolean(saved),
+    projectBytes: getStringByteLength(saved || ""),
+    projectSize: formatBytes(getStringByteLength(saved || "")),
+    currentPageId,
+  };
+
+  if (!saved) {
+    return result;
+  }
+
+  try {
+    const project = normalizeProject(JSON.parse(saved));
+    return {
+      ...result,
+      projectId: project.id,
+      projectName: project.name || "Untitled Binder",
+      setupComplete: project.setupComplete === true,
+      pages: project.pages.length,
+      placements: getNormalizedPlacementCount(project),
+      images: project.images.length,
+      cards: project.cards.length,
+    };
+  } catch (error) {
+    return {
+      ...result,
+      parseError: getSerializableError(error),
+    };
+  }
+}
+
+function getIndexedDbRecordsDiagnostics(records = []) {
+  return records.map((record) => {
+    const project = record?.project ? normalizeProject(record.project) : null;
+    return {
+      id: record?.id || "",
+      savedAt: record?.savedAt || null,
+      currentProjectId: record?.currentProjectId || null,
+      hasProject: Boolean(record?.project),
+      projectId: project?.id || null,
+      projectName: project?.name || null,
+      setupComplete: project?.setupComplete === true,
+      pages: project?.pages.length ?? null,
+      placements: project ? getNormalizedPlacementCount(project) : null,
+      images: project?.images.length ?? null,
+      cards: project?.cards.length ?? null,
+    };
+  });
+}
+
+async function logStartupStorageDiagnostics(label, details = {}) {
+  if (!STORAGE_DIAGNOSTICS_ENABLED) {
+    return;
+  }
+
+  const { error, records, currentRecord, ...context } = details;
+  const storageEstimate = await getStorageEstimateForDiagnostics();
+  const group = console.groupCollapsed || console.group;
+  const endGroup = console.groupEnd || (() => {});
+
+  group.call(console, `[Michi Binder startup] ${label}`);
+  console.info("context", {
+    ...context,
+    error: getSerializableError(error),
+    locationProtocol: window.location.protocol,
+    locationOrigin: window.location.origin,
+  });
+  console.info("localStorage", getLocalStorageDiagnostics());
+  if (records) {
+    console.info("IndexedDB records", getIndexedDbRecordsDiagnostics(records));
+  }
+  if (currentRecord !== undefined) {
+    console.info("IndexedDB current record", getIndexedDbRecordsDiagnostics([currentRecord])[0] || null);
+  }
+  if (storageEstimate) {
+    console.info("navigator.storage.estimate()", storageEstimate);
+  }
+  if (error) {
+    console.error("error", error);
+  }
+  endGroup.call(console);
+}
+
+function getIndexedDbRecordDiagnostics(record, context = {}) {
+  const embeddedDataUrlChars = record?.project ? getProjectEmbeddedDataUrlChars(record.project) : 0;
+
+  return {
+    ...context,
+    store: INDEXED_DB_STORE,
+    recordId: record?.id || "",
+    hasProject: Boolean(record?.project),
+    embeddedDataUrlChars,
+    embeddedDataUrlSize: formatBytes(embeddedDataUrlChars),
+  };
 }
 
 function queueIndexedDbAutoSave() {
@@ -1508,30 +2151,129 @@ function queueIndexedDbAutoSave() {
   }, 350);
 }
 
-function putIndexedDbRecord(db, record) {
+function putIndexedDbRecord(db, record, context = {}) {
   return new Promise((resolve, reject) => {
     const transaction = db.transaction(INDEXED_DB_STORE, "readwrite");
-    transaction.objectStore(INDEXED_DB_STORE).put(record);
+    const request = transaction.objectStore(INDEXED_DB_STORE).put(record);
+    request.addEventListener("error", () => {
+      console.error("[Michi Binder storage] IndexedDB put request failed", {
+        ...getIndexedDbRecordDiagnostics(record, context),
+        error: getSerializableError(request.error),
+      });
+    });
     transaction.addEventListener("complete", resolve);
-    transaction.addEventListener("error", () => reject(transaction.error));
-    transaction.addEventListener("abort", () => reject(transaction.error));
+    transaction.addEventListener("error", () => {
+      console.error("[Michi Binder storage] IndexedDB transaction failed", {
+        ...getIndexedDbRecordDiagnostics(record, context),
+        error: getSerializableError(transaction.error || request.error),
+      });
+      reject(transaction.error || request.error);
+    });
+    transaction.addEventListener("abort", () => {
+      console.error("[Michi Binder storage] IndexedDB transaction aborted", {
+        ...getIndexedDbRecordDiagnostics(record, context),
+        error: getSerializableError(transaction.error || request.error),
+      });
+      reject(transaction.error || request.error);
+    });
   });
 }
 
 async function hydrateProjectFromIndexedDbIfNeeded() {
+  const shouldRecoverCurrentProject = !hasLocalStorageProject() || !state.project.setupComplete;
+  await logStartupStorageDiagnostics("hydrate begin", {
+    shouldRecoverCurrentProject,
+    stateProjectId: state.project.id,
+    stateProjectSetupComplete: state.project.setupComplete === true,
+    stateCurrentPageId: state.currentPageId,
+  });
+
   try {
-    await refreshLocalProjectChoices({ openWhenAvailable: true });
+    if (shouldRecoverCurrentProject) {
+      const recovered = await loadCurrentIndexedDbProject();
+      await logStartupStorageDiagnostics(recovered ? "current project recovered" : "no current project to recover", {
+        shouldRecoverCurrentProject,
+        recovered,
+        stateProjectId: state.project.id,
+      stateProjectSetupComplete: state.project.setupComplete === true,
+    });
+    if (recovered) {
+      renderAll();
+      return;
+    }
+  }
   } catch (error) {
-    console.warn("Could not load IndexedDB project.", error);
+    console.error("Could not load IndexedDB project.", error);
+    await logStartupStorageDiagnostics("hydrate failed", {
+      shouldRecoverCurrentProject,
+      error,
+      stateProjectId: state.project.id,
+      stateProjectSetupComplete: state.project.setupComplete === true,
+    });
+    state.indexedDbLastError = error;
+    renderProjectControls();
+  }
+}
+
+async function loadCurrentIndexedDbProject(records = state.localProjectChoices) {
+  const db = await openProjectDatabase();
+  try {
+    const currentRecord = await getIndexedDbRecord(db, INDEXED_DB_CURRENT_PROJECT_ID);
+    await logStartupStorageDiagnostics("IndexedDB current record read", {
+      records,
+      currentRecord,
+    });
+    const record = currentRecord?.project
+      ? currentRecord
+      : records.find((candidate) => candidate.id === currentRecord?.currentProjectId) ||
+        (currentRecord?.currentProjectId ? await getIndexedDbRecord(db, currentRecord.currentProjectId) : null);
+
+    if (!record?.project) {
+      return false;
+    }
+
+    state.project = normalizeProject(record.project);
+    state.currentPageId = record.currentPageId || state.project.pages[0]?.id || null;
+    state.lastModifiedPageId = record.lastModifiedPageId || state.currentPageId;
+    const loadedLastPlacedAssetId =
+      record.lastPlacedAssetId || getInferredLastPlacedAssetId(state.project, state.lastModifiedPageId);
+    state.lastPlacedAssetId = getImage(loadedLastPlacedAssetId)
+      ? loadedLastPlacedAssetId
+      : getInferredLastPlacedAssetId(state.project, state.lastModifiedPageId);
+    resetTransientProjectState();
+    state.indexedDbSavedAt = record.savedAt || currentRecord?.savedAt || null;
+    state.indexedDbLastError = null;
+    resetProjectHistory();
+    saveProjectToLocalStorageBestEffort();
+    return true;
+  } finally {
+    db.close();
   }
 }
 
 async function refreshLocalProjectChoices({ openWhenAvailable = false } = {}) {
   const db = await openProjectDatabase();
-  await migrateLegacyCurrentProjectRecord(db);
-  const records = await getIndexedDbProjectRecords(db);
-  db.close();
+  try {
+    await migrateLegacyCurrentProjectRecord(db);
+  } catch (error) {
+    console.warn("Could not migrate current IndexedDB project record.", error);
+    state.indexedDbLastError = error;
+  }
+
+  let records;
+  try {
+    records = await getIndexedDbProjectRecords(db);
+  } finally {
+    db.close();
+  }
+
   state.localProjectChoices = records;
+  const currentRecord = records.find((record) => record.id === state.project.id);
+  if (currentRecord?.savedAt) {
+    state.indexedDbSavedAt = currentRecord.savedAt;
+    state.indexedDbLastError = null;
+    renderProjectControls();
+  }
   renderLocalProjectPicker();
   if (openWhenAvailable && records.length) {
     openLocalProjectPicker();
@@ -1569,7 +2311,7 @@ async function migrateLegacyCurrentProjectRecord(db) {
 async function getIndexedDbProjectRecords(db) {
   const records = await getAllIndexedDbRecords(db);
   return records
-    .filter((record) => record?.id !== INDEXED_DB_CURRENT_PROJECT_ID && record?.project)
+    .filter((record) => record?.project)
     .map((record) => ({
       id: record.id,
       name: record.project?.name || record.name || "Untitled Binder",
@@ -1590,7 +2332,27 @@ function getAllIndexedDbRecords(db) {
     const transaction = db.transaction(INDEXED_DB_STORE, "readonly");
     const request = transaction.objectStore(INDEXED_DB_STORE).getAll();
     request.addEventListener("success", () => resolve(request.result || []));
-    request.addEventListener("error", () => reject(request.error));
+    request.addEventListener("error", () => {
+      console.error("[Michi Binder storage] IndexedDB getAll request failed", {
+        store: INDEXED_DB_STORE,
+        error: getSerializableError(request.error),
+      });
+      reject(request.error);
+    });
+    transaction.addEventListener("error", () => {
+      console.error("[Michi Binder storage] IndexedDB getAll transaction failed", {
+        store: INDEXED_DB_STORE,
+        error: getSerializableError(transaction.error || request.error),
+      });
+      reject(transaction.error || request.error);
+    });
+    transaction.addEventListener("abort", () => {
+      console.error("[Michi Binder storage] IndexedDB getAll transaction aborted", {
+        store: INDEXED_DB_STORE,
+        error: getSerializableError(transaction.error || request.error),
+      });
+      reject(transaction.error || request.error);
+    });
   });
 }
 
@@ -1599,7 +2361,30 @@ function getIndexedDbRecord(db, id) {
     const transaction = db.transaction(INDEXED_DB_STORE, "readonly");
     const request = transaction.objectStore(INDEXED_DB_STORE).get(id);
     request.addEventListener("success", () => resolve(request.result));
-    request.addEventListener("error", () => reject(request.error));
+    request.addEventListener("error", () => {
+      console.error("[Michi Binder storage] IndexedDB get request failed", {
+        store: INDEXED_DB_STORE,
+        recordId: id,
+        error: getSerializableError(request.error),
+      });
+      reject(request.error);
+    });
+    transaction.addEventListener("error", () => {
+      console.error("[Michi Binder storage] IndexedDB get transaction failed", {
+        store: INDEXED_DB_STORE,
+        recordId: id,
+        error: getSerializableError(transaction.error || request.error),
+      });
+      reject(transaction.error || request.error);
+    });
+    transaction.addEventListener("abort", () => {
+      console.error("[Michi Binder storage] IndexedDB get transaction aborted", {
+        store: INDEXED_DB_STORE,
+        recordId: id,
+        error: getSerializableError(transaction.error || request.error),
+      });
+      reject(transaction.error || request.error);
+    });
   });
 }
 
@@ -1614,10 +2399,20 @@ function deleteIndexedDbRecord(db, id) {
 }
 
 function bindEvents() {
+  els.mobileWarningCloseButton.addEventListener("click", closeMobileWarning);
+
   els.projectSetupForm.addEventListener("submit", (event) => {
     event.preventDefault();
-    const rows = clampInteger(els.setupRowsInput.value, 1, 8, 3);
-    const cols = clampInteger(els.setupColsInput.value, 1, 8, 3);
+    const { rows, cols } = getProjectGridFromControls({
+      rows: els.setupRowsInput,
+      cols: els.setupColsInput,
+    });
+    const layout = getProjectLayoutFromControls({
+      pocketWidth: els.setupPocketWidthInput,
+      pocketHeight: els.setupPocketHeightInput,
+      gapX: els.setupGapXInput,
+      gapY: els.setupGapYInput,
+    });
     const invalidPlacements = state.project.pages.flatMap((page) =>
       page.placements.filter((placement) => !placementFits(placement, rows, cols)),
     );
@@ -1632,6 +2427,7 @@ function bindEvents() {
     state.project.name = els.setupProjectNameInput.value.trim() || "My Binder";
     state.project.rows = rows;
     state.project.cols = cols;
+    state.project.layout = layout;
     state.project.localAutoSave = true;
     state.project.pages.forEach((page) => {
       page.placements = page.placements.filter((placement) => placementFits(placement, rows, cols));
@@ -1643,6 +2439,13 @@ function bindEvents() {
     state.lastPlacedAssetId = null;
     saveProject("Project created", { resetHistory: true });
     renderAll();
+  });
+  bindProjectLayoutPresetControls({
+    preset: els.setupBinderPresetInput,
+    pocketWidth: els.setupPocketWidthInput,
+    pocketHeight: els.setupPocketHeightInput,
+    gapX: els.setupGapXInput,
+    gapY: els.setupGapYInput,
   });
 
   els.projectNameInput.addEventListener("input", () => {
@@ -1661,12 +2464,18 @@ function bindEvents() {
     }
   });
   els.projectSettingsButton.addEventListener("click", () => {
-    closeProjectMenuModal();
     openProjectSettingsModal();
   });
   els.projectSettingsForm.addEventListener("submit", (event) => {
     event.preventDefault();
     saveProjectSettings();
+  });
+  bindProjectLayoutPresetControls({
+    preset: els.settingsBinderPresetInput,
+    pocketWidth: els.settingsPocketWidthInput,
+    pocketHeight: els.settingsPocketHeightInput,
+    gapX: els.settingsGapXInput,
+    gapY: els.settingsGapYInput,
   });
   els.projectSettingsCancelButton.addEventListener("click", closeProjectSettingsModal);
   els.projectSettingsModal.addEventListener("click", (event) => {
@@ -1699,15 +2508,16 @@ function bindEvents() {
   els.loadLocalButton.addEventListener("click", async () => {
     closeProjectMenuModal();
     try {
-      const records = await refreshLocalProjectChoices();
-      if (records.length) {
-        openLocalProjectPicker();
-      } else {
-        setStatus("No local projects found");
-      }
+      await refreshLocalProjectChoices();
+      openLocalProjectPicker();
     } catch (error) {
       console.warn("Could not list local projects.", error);
-      setStatus("Local project list failed");
+      state.indexedDbLastError = error;
+      state.localProjectChoices = [];
+      renderLocalProjectPicker();
+      renderProjectControls();
+      setStatus("Project storage unavailable");
+      openLocalProjectPicker();
     }
   });
 
@@ -2115,6 +2925,16 @@ function renderSetupControls() {
     els.setupProjectNameInput.value = state.project.name || "";
     els.setupRowsInput.value = grid.rows;
     els.setupColsInput.value = grid.cols;
+    syncProjectLayoutControls(
+      {
+        preset: els.setupBinderPresetInput,
+        pocketWidth: els.setupPocketWidthInput,
+        pocketHeight: els.setupPocketHeightInput,
+        gapX: els.setupGapXInput,
+        gapY: els.setupGapYInput,
+      },
+      getProjectLayout(),
+    );
     state.setupInitialized = true;
   }
 }
@@ -2122,6 +2942,13 @@ function renderSetupControls() {
 function getLocalSaveSummary() {
   if (state.indexedDbSavePending) {
     return "Local save: saving...";
+  }
+
+  if (state.indexedDbLastError) {
+    const savedText = state.indexedDbSavedAt
+      ? `Last saved local: ${new Date(state.indexedDbSavedAt).toLocaleString()}`
+      : "No IndexedDB save yet";
+    return `Local save: auto. Autosave failed. ${savedText}`;
   }
 
   const savedText = state.indexedDbSavedAt
@@ -2877,38 +3704,22 @@ async function downloadImageAsDataUrl(url) {
     throw new Error(`Image download failed with status ${response.status}`);
   }
   const blob = await response.blob();
-  const image = await loadImageFromBlob(blob);
-  return compressImageToDataUrl(image, 520);
+  return blobToDataUrl(blob);
 }
 
-function loadImageFromBlob(blob) {
+function blobToDataUrl(blob) {
   return new Promise((resolve, reject) => {
-    const objectUrl = URL.createObjectURL(blob);
-    const image = new Image();
-    image.addEventListener("load", () => {
-      URL.revokeObjectURL(objectUrl);
-      resolve(image);
+    const reader = new FileReader();
+    reader.addEventListener("load", () => {
+      if (typeof reader.result === "string") {
+        resolve(reader.result);
+        return;
+      }
+      reject(new Error("Image could not be read as a data URL"));
     });
-    image.addEventListener("error", () => {
-      URL.revokeObjectURL(objectUrl);
-      reject(new Error("Card art image could not be loaded"));
-    });
-    image.src = objectUrl;
+    reader.addEventListener("error", () => reject(reader.error || new Error("Image could not be loaded")));
+    reader.readAsDataURL(blob);
   });
-}
-
-function compressImageToDataUrl(image, maxWidth) {
-  const scale = Math.min(1, maxWidth / image.naturalWidth);
-  const width = Math.max(1, Math.round(image.naturalWidth * scale));
-  const height = Math.max(1, Math.round(image.naturalHeight * scale));
-  const canvas = document.createElement("canvas");
-  canvas.width = width;
-  canvas.height = height;
-  const ctx = canvas.getContext("2d");
-  ctx.fillStyle = "#ffffff";
-  ctx.fillRect(0, 0, width, height);
-  ctx.drawImage(image, 0, 0, width, height);
-  return canvas.toDataURL("image/jpeg", 0.9);
 }
 
 function renderCardLibrary() {
@@ -3309,8 +4120,31 @@ function getPlacementPreviewImageBox(image, frameWidth, frameHeight) {
   };
 }
 
-function getPlacementLayerPercentSize(image, frameRatio) {
-  const scale = getCoverImageScale(getImageRatio(image, frameRatio), frameRatio);
+function getPlacementLayerPercentSize(image, frameRatio, { fit = "cover" } = {}) {
+  const imageRatio = getImageRatio(image, frameRatio);
+  const scale = fit === "contain" ? getContainImageScale(imageRatio, frameRatio) : getCoverImageScale(imageRatio, frameRatio);
+  return {
+    width: scale.width * 100,
+    height: scale.height * 100,
+  };
+}
+
+function getCardPhysicalLayerScale(placement, layout) {
+  const placementDimensions = getPlacementDimensions(placement.colSpan, placement.rowSpan, layout);
+  const cardDimensions = getPlacementDimensions(placement.colSpan, placement.rowSpan, {
+    pocketWidth: CARD_FACE_WIDTH_MM,
+    pocketHeight: CARD_FACE_HEIGHT_MM,
+    gapX: layout.gapX,
+    gapY: layout.gapY,
+  });
+  return {
+    width: Math.min(1, cardDimensions.width / placementDimensions.width),
+    height: Math.min(1, cardDimensions.height / placementDimensions.height),
+  };
+}
+
+function getCardPhysicalLayerPercentSize(placement, layout) {
+  const scale = getCardPhysicalLayerScale(placement, layout);
   return {
     width: scale.width * 100,
     height: scale.height * 100,
@@ -3327,6 +4161,18 @@ function getCoverImageScale(imageRatio, frameRatio) {
   }
 
   return { width: 1, height: frameRatio / imageRatio };
+}
+
+function getContainImageScale(imageRatio, frameRatio) {
+  if (!Number.isFinite(imageRatio) || imageRatio <= 0 || !Number.isFinite(frameRatio) || frameRatio <= 0) {
+    return { width: 1, height: 1 };
+  }
+
+  if (imageRatio > frameRatio) {
+    return { width: 1, height: frameRatio / imageRatio };
+  }
+
+  return { width: imageRatio / frameRatio, height: 1 };
 }
 
 function getImageRatio(image, fallbackRatio) {
@@ -3617,6 +4463,29 @@ async function placeCardAtSlot(cardId, pageId, row, col) {
   return true;
 }
 
+function getSlotKey(row, col) {
+  return `${row}:${col}`;
+}
+
+function getCardOccupiedSlots(page, grid = getProjectGrid()) {
+  return getCardOccupiedSlotsForAssetIds(page, grid, getProjectCardAssetIds(state.project));
+}
+
+function getCardOccupiedSlotsForAssetIds(page, grid, cardAssetIds) {
+  const slots = new Set();
+  const placements = Array.isArray(page?.placements) ? page.placements : [];
+  placements
+    .filter((placement) => cardAssetIds.has(placement?.imageId) && placementFits(placement, grid.rows, grid.cols))
+    .forEach((placement) => {
+      for (let row = placement.row; row < placement.row + placement.rowSpan; row += 1) {
+        for (let col = placement.col; col < placement.col + placement.colSpan; col += 1) {
+          slots.add(getSlotKey(row, col));
+        }
+      }
+    });
+  return slots;
+}
+
 function renderBinder() {
   const pages = getCurrentSpreadPages();
   const grid = getProjectGrid();
@@ -3691,12 +4560,13 @@ function createPagePreview(page, grid) {
   binderGrid.style.aspectRatio = `${gridDimensions.width} / ${gridDimensions.height}`;
   binderGrid.style.columnGap = `${(layout.gapX / gridDimensions.width) * 100}%`;
   binderGrid.style.rowGap = `${(layout.gapY / gridDimensions.height) * 100}%`;
+  const cardOccupiedSlots = getCardOccupiedSlots(page, grid);
 
   for (let row = 0; row < grid.rows; row += 1) {
     for (let col = 0; col < grid.cols; col += 1) {
       const pocket = document.createElement("button");
       pocket.type = "button";
-      pocket.className = "pocket";
+      pocket.className = `pocket${cardOccupiedSlots.has(getSlotKey(row, col)) ? " card-occupied" : ""}`;
       pocket.style.gridRow = `${row + 1} / span 1`;
       pocket.style.gridColumn = `${col + 1} / span 1`;
       pocket.setAttribute("aria-label", `Page ${pageNumber}, slot row ${row + 1}, column ${col + 1}`);
@@ -3961,9 +4831,12 @@ function createPlacementPreviewBlock(placement, grid, layout) {
 
 function createPlacementImageLayer(image, placement, layout, segment = null) {
   const imageLayer = document.createElement("span");
-  imageLayer.className = "placement-image-layer";
+  const placementIsCard = isCardPlacement(placement);
+  imageLayer.className = `placement-image-layer${placementIsCard ? " card-image-layer" : ""}`;
   const frameRatio = getPlacementAspect(placement.colSpan, placement.rowSpan, layout);
-  const layerSize = getPlacementLayerPercentSize(image, frameRatio);
+  const layerSize = placementIsCard
+    ? getCardPhysicalLayerPercentSize(placement, layout)
+    : getPlacementLayerPercentSize(image, frameRatio);
 
   if (segment) {
     const fullDimensions = getPlacementDimensions(placement.colSpan, placement.rowSpan, layout);
@@ -3984,7 +4857,14 @@ function createPlacementImageLayer(image, placement, layout, segment = null) {
   img.src = image.dataUrl;
   img.alt = image.name || "";
   img.style.transform = cropToTransform(placement.crop);
-  imageLayer.append(img);
+  if (placementIsCard) {
+    const cardFace = document.createElement("span");
+    cardFace.className = "placement-card-face";
+    cardFace.append(img);
+    imageLayer.append(cardFace);
+  } else {
+    imageLayer.append(img);
+  }
   return imageLayer;
 }
 
@@ -4879,8 +5759,13 @@ async function importProjectJson() {
 
   try {
     const text = await file.text();
-    const nextProject = normalizeProject(JSON.parse(text));
+    const rawProject = JSON.parse(text);
+    const nextProject = normalizeProject(rawProject);
     nextProject.setupComplete = true;
+    logProjectImportDiagnostics(rawProject, nextProject, {
+      fileName: file.name,
+      rawJson: text,
+    });
     if (!window.confirm("Replace the current project with this JSON file?")) {
       return;
     }
@@ -4894,6 +5779,19 @@ async function importProjectJson() {
     clearProjectHistoryTransientState();
     saveProject("Project imported", { resetHistory: true });
     renderAll();
+    try {
+      const persisted = await saveProjectToIndexedDb("Project imported", { reason: "json-import" });
+      if (persisted) {
+        await refreshLocalProjectChoices();
+      } else {
+        setStatus("Project imported; autosave unavailable");
+      }
+    } catch (storageError) {
+      console.warn("Could not persist imported project to IndexedDB.", storageError);
+      state.indexedDbLastError = storageError;
+      renderProjectControls();
+      setStatus("Project imported; autosave unavailable");
+    }
   } catch (error) {
     console.warn("Could not import project JSON.", error);
     setStatus("Project JSON import failed");
@@ -5161,6 +6059,10 @@ function drawPdfCutoutImage(ctx, image, crop, fullBounds, visibleBounds, options
   );
   ctx.rotate((safeCrop.rotate * Math.PI) / 180);
   ctx.scale(safeCrop.scale, safeCrop.scale);
+  if (options.fit === "card-scale") {
+    roundRectPath(ctx, -drawWidth / 2, -drawHeight / 2, drawWidth, drawHeight, Math.min(drawWidth, drawHeight) * 0.048);
+    ctx.clip();
+  }
   if (options.muted) {
     ctx.filter = "grayscale(1) opacity(0.45)";
   }
@@ -5385,6 +6287,7 @@ async function renderSpreadToCanvas(pages, settings = getExportSettings().png) {
       spineGap,
       gridWidth,
       gridHeight,
+      layout,
       includePageTitles: exportSettings.includePageTitles,
       printNeededCardsGreyscale: exportSettings.printNeededCardsGreyscale,
     }, imageCache);
@@ -5407,6 +6310,7 @@ async function drawPageToCanvas(ctx, page, pageX, pageY, metrics, imageCache) {
     spineWidth,
     spineGap,
     gridHeight,
+    layout,
     includePageTitles,
     printNeededCardsGreyscale,
   } = metrics;
@@ -5481,6 +6385,8 @@ async function drawPageToCanvas(ctx, page, pageX, pageY, metrics, imageCache) {
       fullBounds,
       visibleBounds,
       {
+        fit: entry.isCard ? "card-scale" : "cover",
+        cardLayerScale: entry.isCard ? getCardPhysicalLayerScale(entry.placement, layout) : null,
         muted: entry.isCard && !isCardOwned(entry.image) && printNeededCardsGreyscale,
         rounded: entry.isCard && isCardOwned(entry.image),
       },
@@ -5502,6 +6408,11 @@ function drawPocket(ctx, x, y, width, height) {
   roundRectPath(ctx, x, y, width, height, 7);
   ctx.fillStyle = "rgba(255, 255, 255, 0.075)";
   ctx.fill();
+  const gradient = ctx.createLinearGradient(x, y, x + width, y + height);
+  gradient.addColorStop(0, "rgba(255, 255, 255, 0.16)");
+  gradient.addColorStop(1, "rgba(255, 255, 255, 0.025)");
+  ctx.fillStyle = gradient;
+  ctx.fill();
   ctx.strokeStyle = "rgba(255, 255, 255, 0.28)";
   ctx.lineWidth = 1;
   ctx.stroke();
@@ -5517,22 +6428,44 @@ function drawPlacementSegment(ctx, image, crop, fullBounds, visibleBounds, optio
   }
   ctx.save();
   ctx.clip();
-  ctx.fillStyle = "#ece7dc";
-  ctx.fillRect(visibleBounds.x, visibleBounds.y, visibleBounds.width, visibleBounds.height);
+  if (options.fit !== "card-scale") {
+    ctx.fillStyle = "#ece7dc";
+    ctx.fillRect(visibleBounds.x, visibleBounds.y, visibleBounds.width, visibleBounds.height);
+  }
 
-  // The PNG exporter mirrors the browser preview by drawing a cover-fit image into
-  // a clipped rectangle, then applying the saved zoom/position/rotation from the
-  // original placement. Segments stay aligned as pieces of the same full image.
+  // The PNG exporter mirrors the browser preview by fitting the image into a clipped
+  // rectangle, then applying the saved zoom/position/rotation from the original placement.
   const imageRatio = image.naturalWidth / image.naturalHeight;
   const targetRatio = fullBounds.width / fullBounds.height;
-  let drawWidth = fullBounds.width;
-  let drawHeight = fullBounds.height;
-  if (imageRatio > targetRatio) {
-    drawHeight = fullBounds.height;
-    drawWidth = fullBounds.height * imageRatio;
-  } else {
-    drawWidth = fullBounds.width;
-    drawHeight = fullBounds.width / imageRatio;
+  const fitScale = options.fit === "card-scale"
+    ? options.cardLayerScale || { width: 1, height: 1 }
+    : getCoverImageScale(imageRatio, targetRatio);
+  const drawWidth = fullBounds.width * fitScale.width;
+  const drawHeight = fullBounds.height * fitScale.height;
+
+  if (options.fit === "card-scale") {
+    const faceX = fullBounds.x + fullBounds.width / 2 - drawWidth / 2;
+    const faceY = fullBounds.y + fullBounds.height / 2 - drawHeight / 2;
+    const imageFitScale = getContainImageScale(imageRatio, drawWidth / drawHeight);
+    const imageDrawWidth = drawWidth * imageFitScale.width;
+    const imageDrawHeight = drawHeight * imageFitScale.height;
+
+    ctx.save();
+    roundRectPath(ctx, faceX, faceY, drawWidth, drawHeight, Math.min(drawWidth, drawHeight) * 0.048);
+    ctx.clip();
+    ctx.translate(
+      faceX + drawWidth / 2 + (safeCrop.x / 100) * imageDrawWidth,
+      faceY + drawHeight / 2 + (safeCrop.y / 100) * imageDrawHeight,
+    );
+    ctx.rotate((safeCrop.rotate * Math.PI) / 180);
+    ctx.scale(safeCrop.scale, safeCrop.scale);
+    if (options.muted) {
+      ctx.filter = "grayscale(1) opacity(0.45)";
+    }
+    ctx.drawImage(image, -imageDrawWidth / 2, -imageDrawHeight / 2, imageDrawWidth, imageDrawHeight);
+    ctx.restore();
+    ctx.restore();
+    return;
   }
 
   ctx.translate(

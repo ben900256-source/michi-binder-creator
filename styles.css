@@ -119,6 +119,44 @@ select:disabled {
   display: none;
 }
 
+.mobile-warning {
+  align-items: center;
+  background: rgba(22, 24, 27, 0.68);
+  display: flex;
+  inset: 0;
+  justify-content: center;
+  padding: 20px;
+  position: fixed;
+  z-index: 40;
+}
+
+.mobile-warning[hidden] {
+  display: none;
+}
+
+.mobile-warning-panel {
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: 10px;
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.28);
+  max-width: 360px;
+  padding: 18px;
+  width: min(100%, 360px);
+}
+
+.mobile-warning-panel h1 {
+  font-size: 1.2rem;
+  line-height: 1.2;
+  margin: 0 0 10px;
+}
+
+.mobile-warning-panel p {
+  color: var(--muted);
+  font-size: 0.94rem;
+  line-height: 1.4;
+  margin: 0 0 14px;
+}
+
 .setup-card {
   background: var(--panel);
   border: 1px solid var(--panel-border);
@@ -133,6 +171,11 @@ select:disabled {
   font-size: 1.25rem;
   line-height: 1.2;
   margin: 0 0 14px;
+}
+
+.setup-project-card {
+  max-height: calc(100vh - 40px);
+  overflow: auto;
 }
 
 .import-card {
@@ -412,6 +455,10 @@ select:disabled {
   min-width: 0;
 }
 
+.local-project-page-pocket.card-occupied {
+  background: rgba(255, 255, 255, 0.12);
+}
+
 .local-project-page-placement {
   background: #ffffff;
   border: 1px solid rgba(32, 36, 42, 0.16);
@@ -420,12 +467,21 @@ select:disabled {
   overflow: hidden;
 }
 
+.local-project-page-placement.card-placement {
+  background: transparent;
+  border-color: transparent;
+}
+
 .local-project-page-placement img {
   display: block;
   height: 100%;
   object-fit: cover;
   transform-origin: center center;
   width: 100%;
+}
+
+.local-project-page-placement.card-placement img {
+  object-fit: contain;
 }
 
 .local-project-last-asset {
@@ -708,9 +764,21 @@ input[type="range"] {
 }
 
 .page-list {
+  background: rgba(255, 255, 255, 0.38);
+  border: 1px solid rgba(217, 213, 203, 0.9);
+  border-radius: 7px;
   display: grid;
   gap: 7px;
+  height: clamp(124px, 26vh, 280px);
   margin-top: 8px;
+  overscroll-behavior: contain;
+  overflow-y: auto;
+  padding: 6px;
+  scrollbar-gutter: stable;
+}
+
+.pages-panel {
+  min-height: 0;
 }
 
 .page-row {
@@ -952,8 +1020,7 @@ input[type="range"] {
   width: 64px;
 }
 
-.card-library-item.not-owned img,
-.placement.not-owned-card .placement-image-layer img {
+.card-library-item.not-owned img {
   filter: grayscale(1);
   opacity: 0.45;
 }
@@ -1210,6 +1277,15 @@ input[type="range"] {
   cursor: copy;
 }
 
+.pocket.card-occupied {
+  background:
+    linear-gradient(145deg, rgba(255, 255, 255, 0.16), rgba(255, 255, 255, 0.025)),
+    var(--pocket);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.16),
+    inset 0 -6px 10px rgba(0, 0, 0, 0.22);
+}
+
 .pocket:hover,
 .pocket.dragover,
 .placement.dragover {
@@ -1249,6 +1325,12 @@ input[type="range"] {
   z-index: 2;
 }
 
+.placement.card-placement {
+  background: transparent;
+  border-color: transparent;
+  box-shadow: none;
+}
+
 .placement.card-placement:not(.not-owned-card) {
   border-radius: 7px;
 }
@@ -1285,6 +1367,11 @@ input[type="range"] {
   transform: translate(-50%, -50%);
 }
 
+.placement-image-layer.card-image-layer {
+  display: grid;
+  place-items: center;
+}
+
 .placement-image-layer img {
   display: block;
   height: 100%;
@@ -1292,6 +1379,21 @@ input[type="range"] {
   max-width: none;
   object-fit: fill;
   transform-origin: center center;
+  width: 100%;
+}
+
+.placement-card-face {
+  border-radius: 4.8%;
+  display: block;
+  height: 100%;
+  overflow: hidden;
+  width: 100%;
+}
+
+.placement-card-face img {
+  height: 100%;
+  margin: 0;
+  object-fit: contain;
   width: 100%;
 }
 
