@@ -96,6 +96,7 @@ const state = {
   placementClipboard: null,
   draggedCardResult: null,
   draggedCardAssetId: null,
+  draggedCardPreviewAsset: null,
   imagePlacementDraft: null,
   pendingImagePlacement: null,
   imageOverlapChoiceResolver: null,
@@ -762,6 +763,7 @@ function resetTransientProjectState() {
   state.placementClipboard = null;
   state.draggedCardResult = null;
   state.draggedCardAssetId = null;
+  state.draggedCardPreviewAsset = null;
   state.imagePlacementDraft = null;
   state.pendingImagePlacement = null;
   state.imageOverlapChoiceResolver = null;
@@ -995,6 +997,7 @@ function clearProjectHistoryTransientState() {
   state.placementClipboard = null;
   state.draggedCardResult = null;
   state.draggedCardAssetId = null;
+  state.draggedCardPreviewAsset = null;
   state.imagePlacementDraft = null;
   state.pendingImagePlacement = null;
   state.hoveredSlot = null;
@@ -3838,13 +3841,14 @@ function renderCardSearchControls() {
     });
     result.addEventListener("dragstart", (event) => {
       state.draggedCardResult = card;
+      setDraggedCardPreviewAsset(card);
       event.dataTransfer.effectAllowed = "copy";
       event.dataTransfer.setData("text/plain", card.name || "TCGdex card");
       event.dataTransfer.setData("application/x-michi-card-id", card.id || "");
       result.classList.add("dragging");
     });
     result.addEventListener("dragend", () => {
-      state.draggedCardResult = null;
+      clearDraggedCardDragState();
       result.classList.remove("dragging");
     });
     els.cardSearchResults.append(result);
@@ -4162,13 +4166,14 @@ function renderCardLibrary() {
     });
     item.addEventListener("dragstart", (event) => {
       state.draggedCardAssetId = card.id;
+      state.draggedCardPreviewAsset = card;
       event.dataTransfer.effectAllowed = "copy";
       event.dataTransfer.setData("text/plain", card.name || "Imported card");
       event.dataTransfer.setData("application/x-michi-card-asset-id", card.id);
       item.classList.add("dragging");
     });
     item.addEventListener("dragend", () => {
-      state.draggedCardAssetId = null;
+      clearDraggedCardDragState();
       item.classList.remove("dragging");
     });
     els.cardLibrary.append(item);
@@ -4789,12 +4794,16 @@ function setHoveredSlot(slot) {
     state.hoveredSlot?.row !== slot.row ||
     state.hoveredSlot?.col !== slot.col;
   state.hoveredSlot = slot;
-  if (changed && (state.pendingImagePlacement || state.placementClipboard)) {
+  if (changed && (state.pendingImagePlacement || state.placementClipboard || state.draggedCardPreviewAsset)) {
     renderBinder();
   }
 }
 
 function clearHoveredSlot(pageId, row, col) {
+  if (state.draggedCardPreviewAsset) {
+    return;
+  }
+
   if (
     state.hoveredSlot?.pageId !== pageId ||
     state.hoveredSlot.row !== row ||
@@ -4804,7 +4813,7 @@ function clearHoveredSlot(pageId, row, col) {
   }
 
   state.hoveredSlot = null;
-  if (state.pendingImagePlacement || state.placementClipboard) {
+  if (state.pendingImagePlacement || state.placementClipboard || state.draggedCardPreviewAsset) {
     renderBinder();
   }
 }
@@ -4840,6 +4849,53 @@ function getClipboardHoverPlacement(pageId) {
     colSpan: clipboard.placement.colSpan,
     crop: normalizeCrop(clipboard.placement.crop),
   };
+}
+
+function getDraggedCardHoverPlacement(pageId) {
+  const card = getDraggedCardPreviewAsset();
+  if (!card || state.hoveredSlot?.pageId !== pageId) {
+    return null;
+  }
+
+  return {
+    id: "dragged-card-placement-preview",
+    imageId: card.id,
+    row: state.hoveredSlot.row,
+    col: state.hoveredSlot.col,
+    rowSpan: 1,
+    colSpan: 1,
+    crop: { ...DEFAULT_CROP },
+  };
+}
+
+function getDraggedCardPreviewAsset() {
+  if (state.draggedCardAssetId) {
+    return getCard(state.draggedCardAssetId);
+  }
+  return state.draggedCardPreviewAsset;
+}
+
+function setDraggedCardPreviewAsset(card) {
+  const imageUrl = getTcgdexCardImageUrl(card, "low", "webp") || getTcgdexCardImageUrl(card, "high", "png");
+  state.draggedCardPreviewAsset = imageUrl
+    ? {
+        id: "dragged-card-preview-asset",
+        name: card.name || "Dragged card",
+        imageUrl,
+        source: "tcgdex",
+      }
+    : null;
+}
+
+function clearDraggedCardDragState() {
+  state.draggedCardResult = null;
+  state.draggedCardAssetId = null;
+  state.draggedCardPreviewAsset = null;
+  const hovered = state.hoveredSlot;
+  state.hoveredSlot = null;
+  if (hovered) {
+    renderBinder();
+  }
 }
 
 async function placeCardInPendingSlot(cardId) {
@@ -5032,8 +5088,7 @@ function createPagePreview(page, grid) {
         pocket.classList.remove("dragover");
         const card = state.draggedCardResult;
         const cardAssetId = state.draggedCardAssetId;
-        state.draggedCardResult = null;
-        state.draggedCardAssetId = null;
+        clearDraggedCardDragState();
         const cardAsset = cardAssetId
           ? getCard(cardAssetId)
           : await importTcgdexCardArt(card, {
@@ -5071,6 +5126,18 @@ function createPagePreview(page, grid) {
   const clipboardHoverPlacement = getClipboardHoverPlacement(page.id);
   if (clipboardHoverPlacement) {
     const hover = createPlacementPreviewBlock(clipboardHoverPlacement, grid, layout);
+    if (hover) {
+      binderGrid.append(hover);
+    }
+  }
+
+  const draggedCardHoverPlacement = getDraggedCardHoverPlacement(page.id);
+  if (draggedCardHoverPlacement) {
+    const hover = createPlacementPreviewBlock(draggedCardHoverPlacement, grid, layout, {
+      image: getDraggedCardPreviewAsset(),
+      isCard: true,
+      previewClass: "drag-card-preview",
+    });
     if (hover) {
       binderGrid.append(hover);
     }
@@ -5178,14 +5245,14 @@ function createPagePreview(page, grid) {
       item.classList.remove("dragover");
       const slot = getSlotFromBinderGridEvent(event, binderGrid, grid);
       if (!slot) {
+        clearDraggedCardDragState();
         setStatus("Drop on a card slot");
         return;
       }
 
       const card = state.draggedCardResult;
       const cardAssetId = state.draggedCardAssetId;
-      state.draggedCardResult = null;
-      state.draggedCardAssetId = null;
+      clearDraggedCardDragState();
       const cardAsset = cardAssetId
         ? getCard(cardAssetId)
         : await importTcgdexCardArt(card, {
@@ -5256,15 +5323,16 @@ function createPagePreview(page, grid) {
   return wrapper;
 }
 
-function createPlacementPreviewBlock(placement, grid, layout) {
-  const image = getImage(placement.imageId);
+function createPlacementPreviewBlock(placement, grid, layout, options = {}) {
+  const image = options.image || getImage(placement.imageId);
   if (!image) return null;
 
   const item = document.createElement("div");
-  const isCard = isCardAssetId(placement.imageId);
+  const isCard = options.isCard || isCardAssetId(placement.imageId);
   item.className = [
     "placement",
     "clipboard-preview",
+    options.previewClass || "",
     isCard ? "card-placement" : "",
     isCard && !isCardOwned(image) ? "not-owned-card" : "",
     placementFits(placement, grid.rows, grid.cols) ? "" : "invalid",
@@ -5274,13 +5342,13 @@ function createPlacementPreviewBlock(placement, grid, layout) {
   item.style.gridRow = `${placement.row + 1} / span ${placement.rowSpan}`;
   item.style.gridColumn = `${placement.col + 1} / span ${placement.colSpan}`;
 
-  item.append(createPlacementImageLayer(image, placement, layout));
+  item.append(createPlacementImageLayer(image, placement, layout, null, { forceCard: isCard }));
   return item;
 }
 
-function createPlacementImageLayer(image, placement, layout, segment = null) {
+function createPlacementImageLayer(image, placement, layout, segment = null, options = {}) {
   const imageLayer = document.createElement("span");
-  const placementIsCard = isCardPlacement(placement);
+  const placementIsCard = options.forceCard || isCardPlacement(placement);
   imageLayer.className = `placement-image-layer${placementIsCard ? " card-image-layer" : ""}`;
   const frameRatio = getPlacementAspect(placement.colSpan, placement.rowSpan, layout);
   const layerSize = placementIsCard
