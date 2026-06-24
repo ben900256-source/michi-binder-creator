@@ -12,6 +12,7 @@ const LOCAL_STORAGE_PROJECT_MAX_CHARS = 4_500_000;
 const STORAGE_DIAGNOSTICS_ENABLED = false;
 const BINDER_ZOOM_MIN = 0.05;
 const BINDER_ZOOM_MAX = 2;
+const BINDER_WHEEL_ZOOM_SENSITIVITY = 0.001;
 const SIDEBAR_WIDTH_MIN = 240;
 const SIDEBAR_WIDTH_MAX = 560;
 const DEFAULT_PROJECT_LAYOUT = {
@@ -3610,6 +3611,7 @@ function bindBinderPanZoom() {
   workspace.addEventListener("pointermove", handleBinderPointerMove);
   workspace.addEventListener("pointerup", handleBinderPointerEnd);
   workspace.addEventListener("pointercancel", handleBinderPointerEnd);
+  workspace.addEventListener("wheel", handleBinderWheelZoom, { passive: false });
   workspace.addEventListener(
     "click",
     (event) => {
@@ -3623,6 +3625,31 @@ function bindBinderPanZoom() {
     },
     true,
   );
+}
+
+function handleBinderWheelZoom(event) {
+  if (event.target.closest(".floating-view-control")) {
+    return;
+  }
+
+  const deltaY = normalizeWheelDeltaY(event);
+  if (!Number.isFinite(deltaY) || Math.abs(deltaY) < 0.01) {
+    return;
+  }
+
+  event.preventDefault();
+  const zoomFactor = Math.exp(-deltaY * BINDER_WHEEL_ZOOM_SENSITIVITY);
+  setManualBinderZoom(state.binderZoom * zoomFactor);
+}
+
+function normalizeWheelDeltaY(event) {
+  if (event.deltaMode === WheelEvent.DOM_DELTA_LINE) {
+    return event.deltaY * 16;
+  }
+  if (event.deltaMode === WheelEvent.DOM_DELTA_PAGE) {
+    return event.deltaY * Math.max(1, els.workspace.clientHeight);
+  }
+  return event.deltaY;
 }
 
 function handleBinderPointerDown(event) {
