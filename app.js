@@ -93,6 +93,9 @@ const state = {
   imageSearchQuery: "",
   imageImportItems: [],
   imageImportIndex: 0,
+  imageFileImportQueue: Promise.resolve(),
+  imageImportSavePromise: null,
+  imageImportSaving: false,
   pendingCardSlot: null,
   placementClipboard: null,
   draggedCardResult: null,
@@ -131,6 +134,8 @@ const state = {
   legacyLocalStorageProjectPending: false,
   indexedDbLastError: null,
   tcgdexCardStorageSlimmingPending: false,
+  tcgdexCardImportPromises: new Map(),
+  tcgdexCardImportQueue: Promise.resolve(),
   projectHistory: {
     undoStack: [],
     redoStack: [],
@@ -760,6 +765,9 @@ function resetTransientProjectState() {
   state.imageSearchQuery = "";
   state.imageImportItems = [];
   state.imageImportIndex = 0;
+  state.imageFileImportQueue = Promise.resolve();
+  state.imageImportSavePromise = null;
+  state.imageImportSaving = false;
   state.pendingCardSlot = null;
   state.placementClipboard = null;
   state.draggedCardResult = null;
@@ -779,6 +787,8 @@ function resetTransientProjectState() {
   state.binderGesture = null;
   state.suppressNextBinderClick = false;
   state.tcgdexCardStorageSlimmingPending = false;
+  state.tcgdexCardImportPromises.clear();
+  state.tcgdexCardImportQueue = Promise.resolve();
 }
 
 function resetProjectPersistenceState({ savedAt = null } = {}) {
@@ -4094,10 +4104,26 @@ function clearCardInsertSearch() {
   renderCardInsertPrompt();
 }
 
-async function importTcgdexCardArt(card, { statusElement = els.cardSearchStatus, renderAfterImport = true } = {}) {
-  const existing = state.project.cards.find(
-    (cardAsset) => cardAsset.source === "tcgdex" && cardAsset.cardId === card.id,
+function getImportedTcgdexCardAsset(cardId) {
+  return state.project.cards.find(
+    (cardAsset) => cardAsset.source === "tcgdex" && cardAsset.cardId === cardId,
   );
+}
+
+function enqueueTcgdexCardImport(importTask) {
+  const queuedImport = state.tcgdexCardImportQueue.then(importTask, importTask);
+  state.tcgdexCardImportQueue = queuedImport.catch(() => null);
+  return queuedImport;
+}
+
+async function importTcgdexCardArt(card, { statusElement = els.cardSearchStatus, renderAfterImport = true } = {}) {
+  const cardId = card?.id;
+  if (!cardId) {
+    setStatus("Card could not be imported");
+    return null;
+  }
+
+  const existing = getImportedTcgdexCardAsset(cardId);
   if (existing) {
     state.selectedCardId = existing.id;
     setStatus(`Selected ${existing.name}`);
@@ -4113,37 +4139,74 @@ async function importTcgdexCardArt(card, { statusElement = els.cardSearchStatus,
   }
 
   statusElement.textContent = `Importing ${card.name}`;
-  try {
-    const cardDetail = await fetchTcgdexCardDetail(card.id);
-    const cardForImport = cardDetail || card;
-    const imageUrl = getTcgdexCardImageUrl(cardForImport, "high", "png");
-    if (!imageUrl) {
-      throw new Error("Card art image URL is unavailable");
+
+  const existingImport = state.tcgdexCardImportPromises.get(cardId);
+  if (existingImport) {
+    const imported = await existingImport;
+    if (imported) {
+      state.selectedCardId = imported.id;
+      if (renderAfterImport) {
+        renderAll();
+      }
     }
-    const cardAsset = {
-      id: createId(),
-      name: formatTcgdexCardImageName(cardForImport),
-      imageUrl,
-      source: "tcgdex",
-      cardId: cardForImport.id,
-      cardName: cardForImport.name,
-      setName: cardForImport.set?.name,
-      number: cardForImport.localId,
-      rarity: cardForImport.rarity,
-      owned: true,
-    };
-    state.project.cards.push(cardAsset);
-    state.selectedCardId = cardAsset.id;
-    saveProject(`Imported ${card.name}`);
-    if (renderAfterImport) {
-      renderAll();
-    }
-    return cardAsset;
-  } catch (error) {
-    console.warn("TCGdex image import failed.", error);
-    statusElement.textContent = "Could not import card art";
-    return null;
+    return imported;
   }
+
+  const persistenceToken = state.projectPersistenceToken;
+  const importPromise = enqueueTcgdexCardImport(async () => {
+    try {
+      if (persistenceToken !== state.projectPersistenceToken) {
+        return null;
+      }
+
+      const cardDetail = await fetchTcgdexCardDetail(cardId);
+      if (persistenceToken !== state.projectPersistenceToken) {
+        return null;
+      }
+
+      const existingAfterFetch = getImportedTcgdexCardAsset(cardId);
+      if (existingAfterFetch) {
+        return existingAfterFetch;
+      }
+
+      const cardForImport = cardDetail || card;
+      const imageUrl = getTcgdexCardImageUrl(cardForImport, "high", "png");
+      if (!imageUrl) {
+        throw new Error("Card art image URL is unavailable");
+      }
+      const cardAsset = {
+        id: createId(),
+        name: formatTcgdexCardImageName(cardForImport),
+        imageUrl,
+        source: "tcgdex",
+        cardId: cardForImport.id,
+        cardName: cardForImport.name,
+        setName: cardForImport.set?.name,
+        number: cardForImport.localId,
+        rarity: cardForImport.rarity,
+        owned: true,
+      };
+      state.project.cards.push(cardAsset);
+      state.selectedCardId = cardAsset.id;
+      saveProject(`Imported ${card.name}`);
+      return cardAsset;
+    } catch (error) {
+      console.warn("TCGdex image import failed.", error);
+      statusElement.textContent = "Could not import card art";
+      return null;
+    }
+  }).finally(() => {
+    if (state.tcgdexCardImportPromises.get(cardId) === importPromise) {
+      state.tcgdexCardImportPromises.delete(cardId);
+    }
+  });
+  state.tcgdexCardImportPromises.set(cardId, importPromise);
+
+  const imported = await importPromise;
+  if (imported && renderAfterImport) {
+    renderAll();
+  }
+  return imported;
 }
 
 async function fetchTcgdexCardDetail(cardId) {
@@ -6066,7 +6129,23 @@ function deleteSelectedPlacement() {
   deletePlacement(page.id, state.selectedPlacementId);
 }
 
+function enqueueImageFileImport(importTask) {
+  const queuedImport = state.imageFileImportQueue.then(importTask, importTask);
+  state.imageFileImportQueue = queuedImport.catch(() => null);
+  return queuedImport;
+}
+
 async function importImageFiles(files, fallbackName = "image") {
+  const queuedFiles = Array.from(files || []);
+  const persistenceToken = state.projectPersistenceToken;
+  return enqueueImageFileImport(() => importImageFileBatch(queuedFiles, fallbackName, persistenceToken));
+}
+
+async function importImageFileBatch(files, fallbackName, persistenceToken) {
+  if (persistenceToken !== state.projectPersistenceToken) {
+    return;
+  }
+
   const imageFiles = files.filter((file) => file?.type?.startsWith("image/"));
   if (!imageFiles.length) {
     setStatus("No image files found");
@@ -6075,10 +6154,22 @@ async function importImageFiles(files, fallbackName = "image") {
 
   const importItems = [];
   for (const file of imageFiles) {
+    if (persistenceToken !== state.projectPersistenceToken) {
+      return;
+    }
+
     try {
       const dataUrl = await readFileAsDataUrl(file);
+      if (persistenceToken !== state.projectPersistenceToken) {
+        return;
+      }
+
       const fallbackIndex = state.project.images.length + state.imageImportItems.length + importItems.length + 1;
       const dimensions = await getDataUrlImageDimensions(dataUrl);
+      if (persistenceToken !== state.projectPersistenceToken) {
+        return;
+      }
+
       importItems.push({
         originalName: file.name || `${fallbackName}-${fallbackIndex}.png`,
         name: stripImageExtension(file.name) || titleCaseFallbackName(fallbackName, fallbackIndex),
@@ -6097,6 +6188,10 @@ async function importImageFiles(files, fallbackName = "image") {
     return;
   }
 
+  if (persistenceToken !== state.projectPersistenceToken) {
+    return;
+  }
+
   state.imageImportItems.push(...importItems);
   if (state.imageImportItems.length === importItems.length) {
     state.imageImportIndex = 0;
@@ -6112,6 +6207,8 @@ function getCurrentImageImportItem() {
 function renderImageImportWizard() {
   const item = getCurrentImageImportItem();
   els.imageImportWizard.hidden = !item;
+  els.imageImportSaveButton.disabled = state.imageImportSaving;
+  els.imageImportSkipButton.disabled = state.imageImportSaving;
   if (!item) {
     els.imageImportPreviewImage.removeAttribute("src");
     return;
@@ -6189,34 +6286,58 @@ function applyImageImportPreviewCrop() {
 }
 
 async function importCurrentWizardImage() {
-  const item = getCurrentImageImportItem();
-  if (!item) return;
+  if (state.imageImportSavePromise) {
+    return state.imageImportSavePromise;
+  }
 
+  const item = getCurrentImageImportItem();
+  if (!item) return false;
+
+  state.imageImportSaving = true;
   els.imageImportSaveButton.disabled = true;
   els.imageImportSkipButton.disabled = true;
-  try {
-    const dataUrl = await createImportedImageDataUrl(item);
-    const image = {
-      id: createId(),
-      name: (item.name || "").trim() || stripImageExtension(item.originalName) || "Imported Image",
-      dataUrl,
-      source: "upload",
-    };
+  const persistenceToken = state.projectPersistenceToken;
+  const savePromise = (async () => {
+    try {
+      const dataUrl = await createImportedImageDataUrl(item);
+      if (persistenceToken !== state.projectPersistenceToken || !state.imageImportItems.includes(item)) {
+        return false;
+      }
 
-    state.project.images.push(image);
-    if (item.width && item.height) {
-      state.imageNaturalSizes.set(image.id, { width: item.width, height: item.height });
+      const image = {
+        id: createId(),
+        name: (item.name || "").trim() || stripImageExtension(item.originalName) || "Imported Image",
+        dataUrl,
+        source: "upload",
+      };
+
+      state.project.images.push(image);
+      if (item.width && item.height) {
+        state.imageNaturalSizes.set(image.id, { width: item.width, height: item.height });
+      }
+      state.selectedImageId = image.id;
+      saveProject(`Imported ${image.name}`);
+      await flushIndexedDbSaveQueue();
+      if (persistenceToken !== state.projectPersistenceToken || !state.imageImportItems.includes(item)) {
+        return false;
+      }
+
+      advanceImageImportWizard();
+      return true;
+    } catch (error) {
+      console.warn("Could not finish image import.", error);
+      setStatus("Image import failed");
+      return false;
+    } finally {
+      if (state.imageImportSavePromise === savePromise) {
+        state.imageImportSavePromise = null;
+        state.imageImportSaving = false;
+        renderAll();
+      }
     }
-    state.selectedImageId = image.id;
-    saveProject(`Imported ${image.name}`);
-    advanceImageImportWizard();
-  } catch (error) {
-    console.warn("Could not finish image import.", error);
-    setStatus("Image import failed");
-  } finally {
-    els.imageImportSaveButton.disabled = false;
-    els.imageImportSkipButton.disabled = false;
-  }
+  })();
+  state.imageImportSavePromise = savePromise;
+  return savePromise;
 }
 
 async function createImportedImageDataUrl(item) {
