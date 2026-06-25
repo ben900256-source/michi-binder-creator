@@ -3321,25 +3321,25 @@ function renderSetupControls() {
 
 function getLocalSaveSummary() {
   if (state.startupPhase === "loading") {
-    return "Local save: loading project...";
+    return "Loading project...";
   }
 
   if (state.indexedDbSavePending) {
-    return "Local save: saving...";
+    return "Saving...";
   }
 
   if (state.indexedDbLastError) {
     const savedText = state.indexedDbSavedAt
-      ? `Last saved local: ${new Date(state.indexedDbSavedAt).toLocaleString()}`
-      : "No IndexedDB save yet";
-    return `Local save: auto. Autosave failed. ${savedText}`;
+      ? `Last saved: ${new Date(state.indexedDbSavedAt).toLocaleString()}`
+      : "Not saved yet";
+    return `Autosave failed. ${savedText}`;
   }
 
   const savedText = state.indexedDbSavedAt
-    ? `Last saved local: ${new Date(state.indexedDbSavedAt).toLocaleString()}`
-    : "Not saved to IndexedDB";
+    ? `Last saved: ${new Date(state.indexedDbSavedAt).toLocaleString()}`
+    : "Not saved yet";
 
-  return `Local save: auto. ${savedText}`;
+  return savedText;
 }
 
 function renderPageList() {
@@ -3370,9 +3370,8 @@ function renderPageList() {
     const button = document.createElement("button");
     button.type = "button";
     button.className = `page-tab${page.id === state.currentPageId ? " active" : ""}`;
-    button.innerHTML = `<span></span><small></small>`;
+    button.innerHTML = `<span></span>`;
     button.querySelector("span").textContent = `${index + 1}. ${page.title || `Page ${index + 1}`}`;
-    button.querySelector("small").textContent = getSpreadLabelForIndex(index);
     button.addEventListener("click", () => {
       selectPage(page.id);
     });
@@ -5789,7 +5788,6 @@ function copySelectedPlacement(mode = "copy") {
   const placement = getSelectedPlacement();
   const asset = placement ? getImage(placement.imageId) : null;
   if (!page || !placement || !asset) {
-    setStatus("Select a placed item first");
     return false;
   }
 

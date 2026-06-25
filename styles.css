@@ -885,7 +885,6 @@ input[type="range"] {
 
 .page-tab {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   gap: 8px;
   width: 100%;
@@ -896,10 +895,6 @@ input[type="range"] {
   background: #e7f1ee;
   border-color: rgba(40, 107, 99, 0.48);
   box-shadow: inset 3px 0 0 var(--accent);
-}
-
-.page-tab small {
-  color: var(--muted);
 }
 
 .page-delete-button {
