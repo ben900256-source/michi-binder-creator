@@ -42,6 +42,8 @@ const PDF_IMAGE_PX_PER_MM = 6;
 const PDF_POINTS_PER_MM = 72 / 25.4;
 const CARD_SEARCH_PAGE_SIZE = 24;
 const PROJECT_HISTORY_MAX_DEPTH = 50;
+const PROJECT_HISTORY_MAX_EMBEDDED_DATA_URL_CHARS = LOCAL_STORAGE_PROJECT_MAX_CHARS;
+const PROJECT_HISTORY_MAX_STACK_CHARS = LOCAL_STORAGE_PROJECT_MAX_CHARS * 3;
 const CARD_FACE_WIDTH_MM = 63;
 const CARD_FACE_HEIGHT_MM = 88;
 
@@ -96,6 +98,8 @@ const state = {
   imageFileImportQueue: Promise.resolve(),
   imageImportSavePromise: null,
   imageImportSaving: false,
+  exportPngPromise: null,
+  exportPdfPromise: null,
   pendingCardSlot: null,
   placementClipboard: null,
   draggedCardResult: null,
@@ -768,6 +772,8 @@ function resetTransientProjectState() {
   state.imageFileImportQueue = Promise.resolve();
   state.imageImportSavePromise = null;
   state.imageImportSaving = false;
+  state.exportPngPromise = null;
+  state.exportPdfPromise = null;
   state.pendingCardSlot = null;
   state.placementClipboard = null;
   state.draggedCardResult = null;
@@ -888,13 +894,42 @@ function getSelectedPlacement() {
   return page?.placements.find((placement) => placement.id === state.selectedPlacementId) || null;
 }
 
+function getProjectEmbeddedDataUrlChars(project = state.project) {
+  const assets = [
+    ...(Array.isArray(project?.images) ? project.images : []),
+    ...(Array.isArray(project?.cards) ? project.cards : []),
+  ];
+  return assets.reduce(
+    (total, asset) => total + (typeof asset?.dataUrl === "string" ? asset.dataUrl.length : 0),
+    0,
+  );
+}
+
+function isProjectHistoryRecordRestorable(record) {
+  return Boolean(record?.projectJson && !record.snapshotSkipped);
+}
+
 function createProjectHistoryRecord() {
-  const project = normalizeProject(JSON.parse(JSON.stringify(state.project)));
-  return {
-    projectJson: JSON.stringify(project),
+  const embeddedDataUrlChars = getProjectEmbeddedDataUrlChars(state.project);
+  const baseRecord = {
     currentPageId: state.currentPageId,
     lastModifiedPageId: state.lastModifiedPageId,
     lastPlacedAssetId: state.lastPlacedAssetId,
+  };
+
+  if (embeddedDataUrlChars > PROJECT_HISTORY_MAX_EMBEDDED_DATA_URL_CHARS) {
+    return {
+      ...baseRecord,
+      projectJson: "",
+      snapshotSkipped: true,
+    };
+  }
+
+  const project = normalizeProject(state.project);
+  return {
+    ...baseRecord,
+    projectJson: JSON.stringify(project),
+    snapshotSkipped: false,
   };
 }
 
@@ -907,9 +942,23 @@ function resetProjectHistory() {
 }
 
 function pushProjectHistoryRecord(stack, record) {
+  if (!isProjectHistoryRecordRestorable(record)) {
+    return;
+  }
+
   stack.push(record);
+  trimProjectHistoryStack(stack);
+}
+
+function trimProjectHistoryStack(stack) {
   if (stack.length > PROJECT_HISTORY_MAX_DEPTH) {
     stack.splice(0, stack.length - PROJECT_HISTORY_MAX_DEPTH);
+  }
+
+  let totalChars = stack.reduce((total, record) => total + (record.projectJson?.length || 0), 0);
+  while (stack.length > 1 && totalChars > PROJECT_HISTORY_MAX_STACK_CHARS) {
+    const removed = stack.shift();
+    totalChars -= removed?.projectJson?.length || 0;
   }
 }
 
@@ -918,7 +967,19 @@ function recordProjectHistoryForSave({ coalesceKey = null } = {}) {
   const previousRecord = state.projectHistory.lastRecord;
   if (!previousRecord) {
     state.projectHistory.lastRecord = nextRecord;
-    state.projectHistory.coalesceKey = coalesceKey;
+    state.projectHistory.coalesceKey = isProjectHistoryRecordRestorable(nextRecord) ? coalesceKey : null;
+    renderProjectHistoryControls();
+    return;
+  }
+
+  if (
+    !isProjectHistoryRecordRestorable(nextRecord) ||
+    !isProjectHistoryRecordRestorable(previousRecord)
+  ) {
+    state.projectHistory.undoStack = [];
+    state.projectHistory.redoStack = [];
+    state.projectHistory.lastRecord = nextRecord;
+    state.projectHistory.coalesceKey = null;
     renderProjectHistoryControls();
     return;
   }
@@ -955,11 +1016,21 @@ function endProjectHistoryCoalescing() {
 }
 
 function canUndoProjectChange() {
-  return state.projectHistory.undoStack.length > 0;
+  return state.projectHistory.undoStack.some(isProjectHistoryRecordRestorable);
 }
 
 function canRedoProjectChange() {
-  return state.projectHistory.redoStack.length > 0;
+  return state.projectHistory.redoStack.some(isProjectHistoryRecordRestorable);
+}
+
+function popProjectHistoryRecord(stack) {
+  while (stack.length) {
+    const record = stack.pop();
+    if (isProjectHistoryRecordRestorable(record)) {
+      return record;
+    }
+  }
+  return null;
 }
 
 function isOverlayOpen(element) {
@@ -1021,6 +1092,12 @@ function clearProjectHistoryTransientState() {
 }
 
 function restoreProjectHistoryRecord(record, message) {
+  if (!isProjectHistoryRecordRestorable(record)) {
+    setStatus("Project history unavailable for this project size");
+    renderProjectHistoryControls();
+    return;
+  }
+
   try {
     const restoredProject = normalizeProject(JSON.parse(record.projectJson));
     state.project = restoredProject;
@@ -1054,7 +1131,11 @@ function undoProjectChange() {
   }
 
   const currentRecord = createProjectHistoryRecord();
-  const targetRecord = state.projectHistory.undoStack.pop();
+  const targetRecord = popProjectHistoryRecord(state.projectHistory.undoStack);
+  if (!targetRecord) {
+    renderProjectHistoryControls();
+    return;
+  }
   pushProjectHistoryRecord(state.projectHistory.redoStack, currentRecord);
   restoreProjectHistoryRecord(targetRecord, "Undid project change");
 }
@@ -1066,7 +1147,11 @@ function redoProjectChange() {
   }
 
   const currentRecord = createProjectHistoryRecord();
-  const targetRecord = state.projectHistory.redoStack.pop();
+  const targetRecord = popProjectHistoryRecord(state.projectHistory.redoStack);
+  if (!targetRecord) {
+    renderProjectHistoryControls();
+    return;
+  }
   pushProjectHistoryRecord(state.projectHistory.undoStack, currentRecord);
   restoreProjectHistoryRecord(targetRecord, "Redid project change");
 }
@@ -6526,6 +6611,10 @@ async function exportFromModal(format) {
 }
 
 async function exportCurrentPagePng(options = {}) {
+  if (state.exportPngPromise) {
+    return state.exportPngPromise;
+  }
+
   const settings = normalizePngExportSettings(options.settings || getExportSettings().png);
   const pages = options.pages || getCurrentSpreadPages();
   if (!pages.length) {
@@ -6533,26 +6622,37 @@ async function exportCurrentPagePng(options = {}) {
     return;
   }
 
-  els.exportPngButton.disabled = true;
-  setStatus("Rendering PNG");
+  const exportPromise = (async () => {
+    els.exportPngButton.disabled = true;
+    setStatus("Rendering PNG");
 
-  try {
-    const canvas = await renderSpreadToCanvas(pages, settings);
-    const url = canvas.toDataURL("image/png");
-    const anchor = document.createElement("a");
-    anchor.href = url;
-    anchor.download = `${safeFileName(getSpreadExportName(pages))}.png`;
-    anchor.click();
-    setStatus("PNG exported");
-  } catch (error) {
-    console.warn("Could not export PNG.", error);
-    setStatus("PNG export failed");
-  } finally {
-    els.exportPngButton.disabled = false;
-  }
+    try {
+      const canvas = await renderSpreadToCanvas(pages, settings);
+      const url = canvas.toDataURL("image/png");
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `${safeFileName(getSpreadExportName(pages))}.png`;
+      anchor.click();
+      setStatus("PNG exported");
+    } catch (error) {
+      console.warn("Could not export PNG.", error);
+      setStatus("PNG export failed");
+    } finally {
+      els.exportPngButton.disabled = false;
+      if (state.exportPngPromise === exportPromise) {
+        state.exportPngPromise = null;
+      }
+    }
+  })();
+  state.exportPngPromise = exportPromise;
+  return exportPromise;
 }
 
 async function exportCutSheetPdf(options = {}) {
+  if (state.exportPdfPromise) {
+    return state.exportPdfPromise;
+  }
+
   const settings = normalizePdfExportSettings(options.settings || getExportSettings().pdf);
   const pageSelection = options.pageSelection || getExportPageSelection(settings);
   if (pageSelection.error) {
@@ -6567,20 +6667,27 @@ async function exportCutSheetPdf(options = {}) {
     return;
   }
 
-  els.exportPdfButton.disabled = true;
-  setStatus("Rendering cut PDF");
+  const exportPromise = (async () => {
+    els.exportPdfButton.disabled = true;
+    setStatus("Rendering cut PDF");
 
-  try {
-    const packedPages = await packPdfCutouts(cutouts);
-    const pdfBlob = buildCutSheetPdf(packedPages);
-    downloadBlob(pdfBlob, `${safeFileName(state.project.name || "michi-binder")}-cut-sheets.pdf`);
-    setStatus("Cut PDF exported");
-  } catch (error) {
-    console.warn("Could not export cut PDF.", error);
-    setStatus("Cut PDF export failed");
-  } finally {
-    els.exportPdfButton.disabled = false;
-  }
+    try {
+      const packedPages = await packPdfCutouts(cutouts);
+      const pdfBlob = buildCutSheetPdf(packedPages);
+      downloadBlob(pdfBlob, `${safeFileName(state.project.name || "michi-binder")}-cut-sheets.pdf`);
+      setStatus("Cut PDF exported");
+    } catch (error) {
+      console.warn("Could not export cut PDF.", error);
+      setStatus("Cut PDF export failed");
+    } finally {
+      els.exportPdfButton.disabled = false;
+      if (state.exportPdfPromise === exportPromise) {
+        state.exportPdfPromise = null;
+      }
+    }
+  })();
+  state.exportPdfPromise = exportPromise;
+  return exportPromise;
 }
 
 function getProjectPdfCutouts(settings = getExportSettings().pdf, pageSelection = getExportPageSelection(settings)) {
