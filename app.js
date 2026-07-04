@@ -3960,16 +3960,17 @@ function renderCardSearchControls() {
   }
 
   state.cardSearchResults.forEach((card) => {
-    const imageUrl = getTcgdexCardImageUrl(card, "low", "webp");
-    if (!imageUrl) return;
+    const imageUrls = getTcgdexCardPreviewImageUrls(card);
+    if (!imageUrls.length) return;
 
     const result = document.createElement("button");
     result.type = "button";
     result.className = "card-result";
     result.draggable = true;
     result.innerHTML = `<img alt=""><span><strong></strong><span></span><span></span></span>`;
-    result.querySelector("img").src = imageUrl;
-    result.querySelector("img").alt = card.name;
+    const image = result.querySelector("img");
+    image.alt = card.name;
+    setImageSourceFallbacks(image, imageUrls);
     result.querySelector("strong").textContent = card.name;
     const detailLines = result.querySelectorAll("span span");
     detailLines[0].textContent = card.localId ? `Local #${card.localId}` : "No local number";
@@ -4304,6 +4305,37 @@ async function fetchTcgdexCardDetail(cardId) {
 
 function getTcgdexCardImageUrl(card, quality = "high", extension = "png") {
   return card.image ? `${card.image}/${quality}.${extension}` : "";
+}
+
+function getTcgdexCardPreviewImageUrls(card) {
+  return [
+    getTcgdexCardImageUrl(card, "low", "webp"),
+    getTcgdexCardImageUrl(card, "low", "png"),
+    getTcgdexCardImageUrl(card, "high", "webp"),
+    getTcgdexCardImageUrl(card, "high", "png"),
+  ].filter(Boolean);
+}
+
+function setImageSourceFallbacks(image, sources) {
+  const uniqueSources = [...new Set(sources.filter(Boolean))];
+  let sourceIndex = 0;
+
+  image.addEventListener("error", () => {
+    sourceIndex += 1;
+    if (sourceIndex < uniqueSources.length) {
+      image.src = uniqueSources[sourceIndex];
+      return;
+    }
+    image.removeAttribute("src");
+  });
+
+  if (uniqueSources.length) {
+    image.loading = "lazy";
+    image.decoding = "async";
+    image.src = uniqueSources[0];
+  } else {
+    image.removeAttribute("src");
+  }
 }
 
 function formatTcgdexCardImageName(card) {
@@ -4910,15 +4942,16 @@ function renderCardInsertPrompt() {
   }
 
   state.cardInsertSearchResults.forEach((card) => {
-    const imageUrl = getTcgdexCardImageUrl(card, "low", "webp");
-    if (!imageUrl) return;
+    const imageUrls = getTcgdexCardPreviewImageUrls(card);
+    if (!imageUrls.length) return;
 
     const result = document.createElement("button");
     result.type = "button";
     result.className = "card-result";
     result.innerHTML = `<img alt=""><span><strong></strong><span></span><span></span></span>`;
-    result.querySelector("img").src = imageUrl;
-    result.querySelector("img").alt = card.name;
+    const image = result.querySelector("img");
+    image.alt = card.name;
+    setImageSourceFallbacks(image, imageUrls);
     result.querySelector("strong").textContent = card.name;
     const detailLines = result.querySelectorAll("span span");
     detailLines[0].textContent = card.localId ? `Local #${card.localId}` : "No local number";
@@ -5073,7 +5106,7 @@ function getDraggedCardPreviewAsset() {
 }
 
 function setDraggedCardPreviewAsset(card) {
-  const imageUrl = getTcgdexCardImageUrl(card, "low", "webp") || getTcgdexCardImageUrl(card, "high", "png");
+  const imageUrl = getTcgdexCardImageUrl(card, "high", "png") || getTcgdexCardPreviewImageUrls(card)[0];
   state.draggedCardPreviewAsset = imageUrl
     ? {
         id: "dragged-card-preview-asset",
