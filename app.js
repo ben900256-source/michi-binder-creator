@@ -102,6 +102,7 @@ const state = {
   exportPdfPromise: null,
   pendingCardSlot: null,
   placementClipboard: null,
+  workflowHintDismissed: false,
   draggedCardResult: null,
   draggedCardAssetId: null,
   draggedCardPreviewAsset: null,
@@ -272,6 +273,10 @@ const els = {
   appShell: document.querySelector(".app-shell"),
   sidebarResizer: document.querySelector("#sidebarResizer"),
   workspace: document.querySelector(".workspace"),
+  workspaceWorkflowHint: document.querySelector("#workspaceWorkflowHint"),
+  workspaceWorkflowHintText: document.querySelector("#workspaceWorkflowHintText"),
+  workspaceWorkflowClearButton: document.querySelector("#workspaceWorkflowClearButton"),
+  workspaceWorkflowDismissButton: document.querySelector("#workspaceWorkflowDismissButton"),
   floatingViewControl: document.querySelector(".floating-view-control"),
   spreadCanvas: document.querySelector("#spreadCanvas"),
 };
@@ -3098,6 +3103,8 @@ function bindEvents() {
     renderBinderViewControls();
     applyBinderZoom();
   });
+  els.workspaceWorkflowClearButton.addEventListener("click", clearActivePlacementWorkflow);
+  els.workspaceWorkflowDismissButton.addEventListener("click", dismissWorkspaceWorkflowHint);
 
   window.addEventListener("resize", () => {
     if (state.fitToDisplay) {
@@ -3359,6 +3366,9 @@ function renderRegions(regions) {
   }
   if (renderEverything || regions.has("binderControls")) {
     renderBinderViewControls();
+  }
+  if (renderEverything || regions.has("workflow")) {
+    renderWorkspaceWorkflowHint();
   }
   if (renderEverything || regions.has("cardSearch")) {
     renderCardSearchControls();
@@ -3667,6 +3677,75 @@ function renderBinderViewControls() {
     : `${zoomPercent}%`;
 }
 
+function getActivePlacementWorkflow() {
+  if (state.placementClipboard) {
+    const itemName = state.placementClipboard.assetName || "item";
+    return {
+      mode: "clipboard",
+      itemName,
+      hint: `Clipboard: ${itemName}. Click a pocket to paste.`,
+      pocketAction: "Paste",
+      clearLabel: "Clear clipboard",
+    };
+  }
+
+  if (state.pendingImagePlacement) {
+    const image = getImage(state.pendingImagePlacement.imageId);
+    const itemName = image?.name || "image";
+    return {
+      mode: "image-placement",
+      itemName,
+      hint: `Placing: ${itemName}. Click a pocket to place.`,
+      pocketAction: "Place",
+      clearLabel: "Clear image placement",
+    };
+  }
+
+  return {
+    mode: "insert",
+    itemName: "",
+    hint: "Click an empty pocket to insert a card.",
+    pocketAction: "Insert",
+    clearLabel: "",
+  };
+}
+
+function renderWorkspaceWorkflowHint() {
+  const workflow = getActivePlacementWorkflow();
+  const hidden = state.workflowHintDismissed && workflow.mode === "insert";
+  els.workspaceWorkflowHint.hidden = hidden;
+  els.workspaceWorkflowHint.dataset.workflowMode = workflow.mode;
+  els.workspaceWorkflowHintText.textContent = workflow.hint;
+  els.workspaceWorkflowClearButton.hidden = workflow.mode === "insert";
+  els.workspaceWorkflowClearButton.title = workflow.clearLabel || "Clear";
+  els.workspaceWorkflowClearButton.setAttribute("aria-label", workflow.clearLabel || "Clear");
+  els.workspaceWorkflowDismissButton.hidden = workflow.mode !== "insert";
+}
+
+function clearActivePlacementWorkflow() {
+  const hadClipboard = Boolean(state.placementClipboard);
+  const hadPendingImage = Boolean(state.pendingImagePlacement);
+
+  state.placementClipboard = null;
+  state.pendingImagePlacement = null;
+  state.hoveredSlot = null;
+
+  if (hadClipboard && hadPendingImage) {
+    setStatus("Placement mode cleared");
+  } else if (hadClipboard) {
+    setStatus("Clipboard cleared");
+  } else if (hadPendingImage) {
+    setStatus("Image placement cancelled");
+  }
+
+  renderAll();
+}
+
+function dismissWorkspaceWorkflowHint() {
+  state.workflowHintDismissed = true;
+  renderWorkspaceWorkflowHint();
+}
+
 function applyBinderZoom() {
   applyViewControlSafeArea();
   if (state.fitToDisplay) {
@@ -3722,7 +3801,7 @@ function bindBinderPanZoom() {
 }
 
 function handleBinderWheelZoom(event) {
-  if (event.target.closest(".floating-view-control")) {
+  if (event.target.closest(".floating-view-control, .workspace-workflow-hint")) {
     return;
   }
 
@@ -3751,7 +3830,7 @@ function handleBinderPointerDown(event) {
     return;
   }
 
-  if (event.target.closest(".floating-view-control")) {
+  if (event.target.closest(".floating-view-control, .workspace-workflow-hint")) {
     return;
   }
 
@@ -3785,7 +3864,7 @@ function handleBinderPointerDown(event) {
 }
 
 function isBinderPanBackgroundTarget(target) {
-  if (target.closest(".floating-view-control") || isInteractivePanBlocker(target)) {
+  if (target.closest(".floating-view-control, .workspace-workflow-hint") || isInteractivePanBlocker(target)) {
     return false;
   }
 
@@ -3960,29 +4039,19 @@ function renderCardSearchControls() {
   }
 
   state.cardSearchResults.forEach((card) => {
-    const imageUrls = getTcgdexCardPreviewImageUrls(card);
-    if (!imageUrls.length) return;
-
-    const result = document.createElement("button");
-    result.type = "button";
-    result.className = "card-result";
-    result.draggable = true;
-    result.innerHTML = `<img alt=""><span><strong></strong><span></span><span></span></span>`;
-    const image = result.querySelector("img");
-    image.alt = card.name;
-    setImageSourceFallbacks(image, imageUrls);
-    result.querySelector("strong").textContent = card.name;
-    const detailLines = result.querySelectorAll("span span");
-    detailLines[0].textContent = card.localId ? `Local #${card.localId}` : "No local number";
-    detailLines[1].textContent = card.id || "";
-    result.addEventListener("click", async () => {
-      const cardAsset = await importTcgdexCardArt(card, {
-        statusElement: els.cardSearchStatus,
-        renderAfterImport: false,
-      });
-      if (cardAsset) {
-        setCardPlacementClipboard(cardAsset);
-      }
+    const result = createTcgdexCardResult(card, {
+      actionText: "Copy to place",
+      ariaLabel: `Copy ${card.name || "card"} to place in a pocket`,
+      draggable: true,
+      onSelect: async () => {
+        const cardAsset = await importTcgdexCardArt(card, {
+          statusElement: els.cardSearchStatus,
+          renderAfterImport: false,
+        });
+        if (cardAsset) {
+          setCardPlacementClipboard(cardAsset);
+        }
+      },
     });
     result.addEventListener("dragstart", (event) => {
       state.draggedCardResult = card;
@@ -4316,9 +4385,18 @@ function getTcgdexCardPreviewImageUrls(card) {
   ].filter(Boolean);
 }
 
-function setImageSourceFallbacks(image, sources) {
+function setImageSourceFallbacks(image, sources, { onUnavailable = null } = {}) {
   const uniqueSources = [...new Set(sources.filter(Boolean))];
   let sourceIndex = 0;
+  let unavailableNotified = false;
+
+  const markUnavailable = () => {
+    image.removeAttribute("src");
+    if (!unavailableNotified) {
+      unavailableNotified = true;
+      onUnavailable?.();
+    }
+  };
 
   image.addEventListener("error", () => {
     sourceIndex += 1;
@@ -4326,7 +4404,7 @@ function setImageSourceFallbacks(image, sources) {
       image.src = uniqueSources[sourceIndex];
       return;
     }
-    image.removeAttribute("src");
+    markUnavailable();
   });
 
   if (uniqueSources.length) {
@@ -4334,8 +4412,46 @@ function setImageSourceFallbacks(image, sources) {
     image.decoding = "async";
     image.src = uniqueSources[0];
   } else {
-    image.removeAttribute("src");
+    markUnavailable();
   }
+}
+
+function createTcgdexCardResult(card, { actionText, ariaLabel, draggable = false, onSelect }) {
+  const result = document.createElement("button");
+  result.type = "button";
+  result.className = "card-result";
+  result.draggable = draggable;
+  result.setAttribute("aria-label", ariaLabel);
+  result.innerHTML = `
+    <span class="card-result-preview">
+      <img alt="">
+      <span class="card-preview-unavailable" hidden>Preview unavailable</span>
+    </span>
+    <span class="card-result-copy">
+      <strong></strong>
+      <span class="card-result-detail"></span>
+      <span class="card-result-detail"></span>
+      <span class="card-result-action"></span>
+    </span>
+  `;
+
+  const image = result.querySelector("img");
+  image.alt = card.name ? `${card.name} preview` : "Card preview";
+  setImageSourceFallbacks(image, getTcgdexCardPreviewImageUrls(card), {
+    onUnavailable: () => {
+      result.classList.add("preview-unavailable");
+      result.querySelector(".card-preview-unavailable").hidden = false;
+    },
+  });
+
+  result.querySelector("strong").textContent = card.name || "Unnamed card";
+  const detailLines = result.querySelectorAll(".card-result-detail");
+  detailLines[0].textContent = card.localId ? `Local #${card.localId}` : "No local number";
+  detailLines[1].textContent = card.id || "";
+  result.querySelector(".card-result-action").textContent = actionText;
+  result.addEventListener("click", onSelect);
+
+  return result;
 }
 
 function formatTcgdexCardImageName(card) {
@@ -4365,11 +4481,12 @@ function renderCardLibrary() {
     item.draggable = true;
     item.tabIndex = 0;
     item.setAttribute("role", "button");
-    item.setAttribute("aria-label", `Copy ${card.name} to placement clipboard`);
-    item.innerHTML = `<img alt=""><span></span><label class="card-owned-control"><input type="checkbox"><span>Have</span></label>`;
+    item.setAttribute("aria-label", `Copy ${card.name} to place in a pocket`);
+    item.innerHTML = `<img alt=""><span></span><label class="card-owned-control"><input type="checkbox"><span class="card-owned-label"></span></label>`;
     item.querySelector("img").src = getAssetImageSrc(card);
     item.querySelector("img").alt = card.name;
     item.querySelector("span").textContent = card.name;
+    item.querySelector(".card-owned-label").textContent = isCardOwned(card) ? "Owned" : "Needed";
     item.querySelector(".card-owned-control").addEventListener("click", (event) => {
       event.stopPropagation();
     });
@@ -4887,6 +5004,7 @@ function startPendingImagePlacement() {
     rowSpan: draft.rowSpan,
     crop: normalizeCrop(draft.crop),
   };
+  state.placementClipboard = null;
   state.imagePlacementDraft = null;
   setStatus(`Click a slot to place ${image.name}`);
   renderAll();
@@ -4942,28 +5060,18 @@ function renderCardInsertPrompt() {
   }
 
   state.cardInsertSearchResults.forEach((card) => {
-    const imageUrls = getTcgdexCardPreviewImageUrls(card);
-    if (!imageUrls.length) return;
-
-    const result = document.createElement("button");
-    result.type = "button";
-    result.className = "card-result";
-    result.innerHTML = `<img alt=""><span><strong></strong><span></span><span></span></span>`;
-    const image = result.querySelector("img");
-    image.alt = card.name;
-    setImageSourceFallbacks(image, imageUrls);
-    result.querySelector("strong").textContent = card.name;
-    const detailLines = result.querySelectorAll("span span");
-    detailLines[0].textContent = card.localId ? `Local #${card.localId}` : "No local number";
-    detailLines[1].textContent = card.id || "";
-    result.addEventListener("click", async () => {
-      const cardAsset = await importTcgdexCardArt(card, {
-        statusElement: els.cardInsertSearchStatus,
-        renderAfterImport: false,
-      });
-      if (cardAsset) {
-        await placeCardInPendingSlot(cardAsset.id);
-      }
+    const result = createTcgdexCardResult(card, {
+      actionText: "Insert here",
+      ariaLabel: `Insert ${card.name || "card"} here`,
+      onSelect: async () => {
+        const cardAsset = await importTcgdexCardArt(card, {
+          statusElement: els.cardInsertSearchStatus,
+          renderAfterImport: false,
+        });
+        if (cardAsset) {
+          await placeCardInPendingSlot(cardAsset.id);
+        }
+      },
     });
     els.cardInsertSearchResults.append(result);
   });
@@ -5279,6 +5387,7 @@ function createPagePreview(page, grid) {
   binderGrid.style.columnGap = `${(layout.gapX / gridDimensions.width) * 100}%`;
   binderGrid.style.rowGap = `${(layout.gapY / gridDimensions.height) * 100}%`;
   const cardOccupiedSlots = getCardOccupiedSlots(page, grid);
+  const workflow = getActivePlacementWorkflow();
 
   for (let row = 0; row < grid.rows; row += 1) {
     for (let col = 0; col < grid.cols; col += 1) {
@@ -5287,7 +5396,18 @@ function createPagePreview(page, grid) {
       pocket.className = `pocket${cardOccupiedSlots.has(getSlotKey(row, col)) ? " card-occupied" : ""}`;
       pocket.style.gridRow = `${row + 1} / span 1`;
       pocket.style.gridColumn = `${col + 1} / span 1`;
-      pocket.setAttribute("aria-label", `Page ${pageNumber}, slot row ${row + 1}, column ${col + 1}`);
+      pocket.dataset.action = workflow.pocketAction.toLowerCase();
+      const pocketLocation = `page ${pageNumber}, row ${row + 1}, column ${col + 1}`;
+      const pocketLabel =
+        workflow.mode === "insert"
+          ? `Insert a card at ${pocketLocation}`
+          : `${workflow.pocketAction} ${workflow.itemName} at ${pocketLocation}`;
+      pocket.title = pocketLabel;
+      pocket.setAttribute("aria-label", pocketLabel);
+      const pocketActionLabel = document.createElement("span");
+      pocketActionLabel.className = "pocket-action-label";
+      pocketActionLabel.textContent = workflow.pocketAction;
+      pocket.append(pocketActionLabel);
       pocket.addEventListener("mouseenter", () => {
         setHoveredSlot({ pageId: page.id, row, col });
       });
@@ -5428,7 +5548,7 @@ function createPagePreview(page, grid) {
 
       const ownedToggle = document.createElement("span");
       ownedToggle.className = "placement-owned-toggle";
-      ownedToggle.textContent = isCardOwned(image) ? "Have" : "Need";
+      ownedToggle.textContent = isCardOwned(image) ? "Owned" : "Needed";
       ownedToggle.title = isCardOwned(image) ? "Mark as needed" : "Mark as owned";
       item.append(ownedToggle);
     }
@@ -5938,6 +6058,7 @@ function getSlotFromBinderGridEvent(event, binderGrid, grid) {
 function setCardPlacementClipboard(cardAsset) {
   if (!cardAsset) return false;
 
+  state.pendingImagePlacement = null;
   state.placementClipboard = {
     mode: "copy",
     sourcePageId: null,
@@ -5952,8 +6073,7 @@ function setCardPlacementClipboard(cardAsset) {
   };
   state.selectedCardId = cardAsset.id;
   setStatus(`Copied ${cardAsset.name}. Click a target slot to paste.`);
-  renderCardLibrary();
-  renderCardInsertPrompt();
+  renderAll();
   return true;
 }
 
@@ -5972,6 +6092,7 @@ function copySelectedPlacement(mode = "copy") {
     return false;
   }
 
+  state.pendingImagePlacement = null;
   state.placementClipboard = {
     mode,
     sourcePageId: page.id,
@@ -5985,7 +6106,7 @@ function copySelectedPlacement(mode = "copy") {
     },
   };
   setStatus(`${mode === "cut" ? "Cut" : "Copied"} ${asset.name}. Click a target slot to paste.`);
-  renderCardInsertPrompt();
+  renderAll();
   return true;
 }
 
